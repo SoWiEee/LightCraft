@@ -22,7 +22,6 @@ class ImageDocument:
 
     def open_image(self, path: str) -> None:
         image, metadata = load_image(path)
-        # Immutable session source buffer by convention.
         self.source_image = image.copy()
         self.metadata = metadata
         self.edit_state = EditState()

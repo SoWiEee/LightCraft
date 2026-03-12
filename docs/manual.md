@@ -1,112 +1,133 @@
 # LightCraft Manual
 
-## 1. Scope of this build
+## 1. What this build can do
 
-This build implements **Phase 1** only.
+This build covers Phase 2 of the current SDD.
+You can:
 
-Available features:
-- Load one image from disk
-- Scrollable canvas
-- Zoom in / zoom out / fit to window
-- Reset to original
-- Non-destructive source-image session model
-- File and image metadata panel
+- Open one image file
+- View it in the main canvas
+- Zoom in, zoom out, and fit the image to the window
+- Adjust exposure, contrast, white balance, saturation, sharpening, denoise, and shadows
+- Watch the histogram update as the preview changes
+- Open the Settings dialog and switch between light mode and dark mode
+- Replace the application font with any installed font from your computer
+- Reset the entire editing session back to the original image
+- Reset each adjustment individually
 
-Not yet implemented:
-- Histogram
-- Exposure / contrast / white balance / saturation / sharpening / denoise / shadows
-- Crop / rotate
-- Before / after compare
-- Export
-- Presets
-- AI recommendation
-- Edit history
+This build does **not** include presets, export, compare mode, or AI yet.
 
-## 2. Supported formats
+## 2. Launch
 
-- JPEG
-- PNG
-- Any format OpenCV can decode in the local environment
-
-## 3. Launch
+Use Python 3.13 with `uv`.
 
 ```bash
+uv python install 3.13
 uv sync
 uv run lightcraft
 ```
 
-## 4. Basic usage
+## 3. Main UI layout
 
-### Open an image
+### Workflow tab
 
-Use one of these:
-- `File -> Open Image...`
-- `Ctrl+O`
+Shows:
 
-### Reset the session
-
-Use:
-- `Edit -> Reset to Original`
-- `Ctrl+R`
-
-### Zoom controls
-
-Use:
-- `View -> Zoom In`
-- `View -> Zoom Out`
-- `View -> Fit to Window`
-
-## 5. Workflow panel
-
-The left panel is intentionally present in Phase 1 even though most stages are placeholders.
-This keeps the project aligned with the SDD and avoids redesigning the UI later.
-
-Workflow stages shown in the UI:
-1. Load
-2. Analyze
-3. Adjust
-4. Style
-5. Compare
-6. Export
-
-## 6. Metadata panel
-
-The metadata panel currently shows:
-- file name
-- full path
-- pixel dimensions
-- number of channels
-- file size
+- the workflow stages
+- image metadata
 - current zoom
 - render state
+- queued preview indicator
+- quick buttons for reset and settings
 
-This is enough for Phase 1 verification and debugging.
+### Adjust tab
 
-## 7. Presets
+Shows:
 
-Phase 1 does **not** implement presets yet.
-The intended preset set for later phases is documented here so UI labels remain stable.
+- live RGB histogram
+- adjustment sliders
+- numeric values
+- reset button per adjustment
 
-Planned presets:
-1. Auto Starter
-2. Landscape Pop
-3. Portrait Soft
-4. Night Clean
-5. Food Warm
-6. Monochrome Contrast
+## 4. Opening an image
 
-These names are placeholders in Phase 1 and are **not selectable** yet.
+1. Start the application.
+2. Choose **File > Open Image...**
+3. Select a JPG, JPEG, PNG, BMP, TIFF, or WEBP file.
+4. The image will load into the main canvas.
+5. Metadata and histogram update automatically.
 
-## 8. Troubleshooting
+## 5. Adjustment controls
 
-### App opens but no image is shown
-- Confirm the selected file is a valid image.
-- Confirm the file is not locked by another process.
-- Confirm OpenCV can decode the format in your environment.
+### Exposure
+Brightens or darkens the whole image.
 
-### Reset appears to do nothing
-This is expected in Phase 1 because no adjustments exist yet.
-The reset command still verifies that the source buffer remains untouched and the preview is rebuilt from source.
+### Contrast
+Expands or compresses the difference between dark and bright regions.
 
-### Very large image feels slow
-Phase 1 renders full-resolution previews. Later phases should introduce preview downscaling and render debouncing.
+### White Balance
+Moves the image toward cooler or warmer tones.
+
+### Saturation
+Controls how strong the colors appear.
+
+### Sharpening
+Increases edge clarity.
+
+### Denoise
+Reduces visible noise, especially in darker areas.
+
+### Shadows
+Lifts or deepens darker regions while preserving brighter areas as much as possible.
+
+## 6. Settings dialog
+
+Open the settings window from either:
+
+- **Settings > Settings...** in the menu bar
+- **Open Settings** button in the Workflow tab
+
+### Appearance tab
+
+- **Theme mode**
+  - Follow system
+  - Light
+  - Dark
+- **Installed font**
+  - Choose any font available on your local computer
+- **Font size**
+  - Changes the application UI font size
+- **Use default UI font**
+  - Resets the custom font choice back to the default
+
+### Behavior tab
+
+- **Preview debounce**
+  - Controls how quickly preview rendering reacts while sliders are being dragged
+  - Lower values update faster but can cost more CPU
+
+## 7. Reset behavior
+
+### Reset one control
+Press the **Reset** button next to that control.
+
+### Reset the whole image
+Use **Edit > Reset to Original** or press **Ctrl+R**.
+This restores all adjustment values to defaults and rebuilds the preview from the original source buffer.
+
+## 8. Presets
+
+Presets are not implemented in this phase.
+They are planned for a later phase. The current built-in preset list target is:
+
+- Auto Clean
+- Portrait Soft
+- Landscape Clear
+- Night Rescue
+- Food Warm
+- B&W Contrast
+
+## 9. AI features
+
+Hugging Face recommendation and coaching are not implemented in this phase.
+They are planned for a later phase after presets and edit-history support are stable.

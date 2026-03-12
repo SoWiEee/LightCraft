@@ -38,10 +38,11 @@ class CanvasView(QScrollArea):
         self._scale_factor = 1.0
         self.zoom_changed.emit(self._scale_factor)
 
-    def set_image_array(self, image: np.ndarray) -> None:
+    def set_image_array(self, image: np.ndarray, *, preserve_zoom: bool = True) -> None:
         pixmap = self._numpy_to_pixmap(image)
         self._base_pixmap = pixmap
-        self._scale_factor = 1.0
+        if not preserve_zoom:
+            self._scale_factor = 1.0
         self._apply_scaled_pixmap()
         self.zoom_changed.emit(self._scale_factor)
 
@@ -73,8 +74,6 @@ class CanvasView(QScrollArea):
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        if self._base_pixmap is None:
-            return
 
     def _apply_scaled_pixmap(self) -> None:
         if self._base_pixmap is None:
