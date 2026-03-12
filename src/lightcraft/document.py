@@ -31,6 +31,10 @@ class ImageDocument:
         self.preview_image = self.render_engine.render_preview(self.source_image, self.edit_state)
         self.analysis = self.analysis_service.analyze(self.preview_image)
 
+    def set_edit_state(self, state: EditState) -> None:
+        self.edit_state = state.clone()
+        self.rerender()
+
     def rerender(self) -> None:
         if self.source_image is None:
             return

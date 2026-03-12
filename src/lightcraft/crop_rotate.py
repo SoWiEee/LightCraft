@@ -3,16 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QSlider,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+
+from .i18n import Localizer
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,8 +38,10 @@ class TransformRow(QFrame):
     def __init__(self, spec: TransformSpec, parent=None) -> None:
         super().__init__(parent)
         self.spec = spec
+        self.localizer = Localizer()
         self._build_ui()
         self.set_value(float(spec.default), emit_signal=False)
+        self.retranslate_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -54,7 +49,6 @@ class TransformRow(QFrame):
 
         top = QHBoxLayout()
         self.name_label = QLabel(self.spec.label)
-        self.name_label.setToolTip(self.spec.explanation)
         self.value_label = QLabel(self.spec.format_value(self.spec.default))
         self.reset_button = QPushButton("Reset")
         self.reset_button.clicked.connect(self._reset_clicked)
@@ -65,12 +59,21 @@ class TransformRow(QFrame):
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(self.spec.minimum, self.spec.maximum)
-        self.slider.setToolTip(self.spec.explanation)
         self.slider.valueChanged.connect(self._on_slider_changed)
         self.slider.sliderReleased.connect(self._on_slider_released)
 
         layout.addLayout(top)
         layout.addWidget(self.slider)
+
+    def set_localizer(self, localizer: Localizer) -> None:
+        self.localizer = localizer
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.name_label.setText(self.localizer.tr(self.spec.label))
+        self.name_label.setToolTip(self.localizer.tr(self.spec.explanation))
+        self.slider.setToolTip(self.localizer.tr(self.spec.explanation))
+        self.reset_button.setText(self.localizer.tr("Reset"))
 
     def _on_slider_changed(self, slider_value: int) -> None:
         self.value_label.setText(self.spec.format_value(slider_value))
@@ -109,6 +112,10 @@ class TransformPanel(QWidget):
             self.rows[spec.key] = row
             layout.addWidget(row, row_index, 0)
         layout.setRowStretch(len(TRANSFORM_SPECS), 1)
+
+    def set_localizer(self, localizer: Localizer) -> None:
+        for row in self.rows.values():
+            row.set_localizer(localizer)
 
     def set_control_value(self, key: str, value: float, *, emit_signal: bool = False) -> None:
         row = self.rows.get(key)

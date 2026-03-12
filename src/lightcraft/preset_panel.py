@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QLabel, QListWidget, QListWidgetItem, QPushButton, QVBoxLayout, QWidget
 
+from .i18n import Localizer
 from .presets import PresetDefinition
 
 
@@ -19,8 +13,10 @@ class PresetPanel(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.localizer = Localizer()
         self._items_by_id: dict[str, QListWidgetItem] = {}
         self._build_ui()
+        self.retranslate_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -46,6 +42,16 @@ class PresetPanel(QWidget):
         self.clear_button.clicked.connect(self.preset_clear_requested)
         layout.addWidget(self.clear_button)
 
+    def set_localizer(self, localizer: Localizer) -> None:
+        self.localizer = localizer
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.apply_button.setText(self.localizer.tr("Apply Selected Preset"))
+        self.clear_button.setText(self.localizer.tr("Clear Preset Tag"))
+        if not self.recommendation_label.text():
+            self.recommendation_label.setText(self.localizer.tr("Recommendation will appear after image analysis."))
+
     def set_presets(self, presets: list[PresetDefinition]) -> None:
         self.list_widget.clear()
         self._items_by_id.clear()
@@ -70,13 +76,11 @@ class PresetPanel(QWidget):
     def _on_item_selected(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
         del previous
         if current is None:
-            self.details_label.setText("Pick a preset to read what it is for.")
+            self.details_label.setText(self.localizer.tr("Pick a preset to read what it is for."))
             return
         preset = current.data(Qt.ItemDataRole.UserRole)
         if isinstance(preset, PresetDefinition):
-            self.details_label.setText(
-                f"{preset.summary}\n\nUse when: {preset.when_to_use}"
-            )
+            self.details_label.setText(f"{preset.summary}\n\nUse when: {preset.when_to_use}")
 
     def _apply_current(self) -> None:
         current = self.list_widget.currentItem()

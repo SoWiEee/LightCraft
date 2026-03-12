@@ -3,16 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QSlider,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider, QVBoxLayout, QWidget
+
+from .i18n import Localizer
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,8 +49,10 @@ class AdjustmentRow(QFrame):
     def __init__(self, spec: AdjustmentSpec, parent=None) -> None:
         super().__init__(parent)
         self.spec = spec
+        self.localizer = Localizer()
         self._build_ui()
         self.set_value(spec.slider_to_value(spec.default), emit_signal=False)
+        self.retranslate_ui()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -65,10 +60,8 @@ class AdjustmentRow(QFrame):
 
         top = QHBoxLayout()
         self.name_label = QLabel(self.spec.label)
-        self.name_label.setToolTip(self.spec.explanation)
         self.value_label = QLabel(self.spec.format_value(self.spec.slider_to_value(self.spec.default)))
         self.reset_button = QPushButton("Reset")
-        self.reset_button.setToolTip(f"Reset {self.spec.label} to default")
         self.reset_button.clicked.connect(self._reset_clicked)
         top.addWidget(self.name_label)
         top.addStretch(1)
@@ -79,12 +72,22 @@ class AdjustmentRow(QFrame):
         self.slider.setRange(self.spec.minimum, self.spec.maximum)
         self.slider.setSingleStep(self.spec.step)
         self.slider.setPageStep(max(1, self.spec.step * 5))
-        self.slider.setToolTip(self.spec.explanation)
         self.slider.valueChanged.connect(self._on_slider_changed)
         self.slider.sliderReleased.connect(self._on_slider_released)
 
         layout.addLayout(top)
         layout.addWidget(self.slider)
+
+    def set_localizer(self, localizer: Localizer) -> None:
+        self.localizer = localizer
+        self.retranslate_ui()
+
+    def retranslate_ui(self) -> None:
+        self.name_label.setText(self.localizer.tr(self.spec.label))
+        self.name_label.setToolTip(self.localizer.tr(self.spec.explanation))
+        self.slider.setToolTip(self.localizer.tr(self.spec.explanation))
+        self.reset_button.setText(self.localizer.tr("Reset"))
+        self.reset_button.setToolTip(f"{self.localizer.tr('Reset')} {self.localizer.tr(self.spec.label)}")
 
     def _on_slider_changed(self, slider_value: int) -> None:
         value = self.spec.slider_to_value(slider_value)
@@ -126,6 +129,10 @@ class AdjustmentPanel(QWidget):
             self.rows[spec.key] = row
             layout.addWidget(row, row_index, 0)
         layout.setRowStretch(len(ADJUSTMENT_SPECS), 1)
+
+    def set_localizer(self, localizer: Localizer) -> None:
+        for row in self.rows.values():
+            row.set_localizer(localizer)
 
     def set_control_value(self, key: str, value: float, *, emit_signal: bool = False) -> None:
         row = self.rows.get(key)

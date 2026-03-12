@@ -1,13 +1,17 @@
-# LightCraft Phase 4
+# LightCraft Phase 5+ History
 
 LightCraft is a workflow-based desktop photo editor for beginner photographers.
-This build keeps the three-column workflow UI and adds an extensible preset system with explainable scene analysis.
+This build adds edit history and time-travel navigation, moves image metadata into a dedicated File tab, and introduces UI language switching for English and Traditional Chinese.
 
 ## Implemented in this build
 
 - Single-image session with immutable source buffer
 - Non-destructive preview re-render from `source_image + EditState`
 - Scrollable image canvas with zoom in/out and fit-to-window
+- Three-column workflow UI
+- Left panel split into:
+  - **Workflow** tab for guidance, analysis, compare, and history
+  - **File** tab for image metadata and session actions
 - Histogram panel that updates after image load and preview refresh
 - Global adjustment controls:
   - Exposure
@@ -22,23 +26,36 @@ This build keeps the three-column workflow UI and adds an extensible preset syst
   - Crop Left / Top / Right / Bottom
 - Settings dialog:
   - Theme mode: system, light, dark
+  - UI language: English / Traditional Chinese
   - Installed font selection from local computer fonts
   - UI font size
   - Preview debounce interval
-- Phase 4 additions:
-  - Scene analysis service with fast, explainable descriptors
-  - Six built-in presets in a registry module
-  - Recommended preset based on image descriptors
-  - Style tab for preset browsing and applying
+- Scene analysis service with fast, explainable descriptors
+- Six built-in presets in a registry module
+- Recommended preset based on image descriptors
+- Compare modes:
+  - Edited only
+  - Split compare
+  - Toggle compare
+- Export flow:
+  - JPEG / PNG / WEBP / BMP / TIFF
+  - JPEG quality option
+  - PNG compression option
+  - Unicode-safe file writing via encoded buffer output
+- Edit history / time travel:
+  - commit-based history entries
+  - Undo / Redo
+  - jump directly to an earlier committed state
+  - future-branch pruning after time travel
 
-## Not in this phase yet
+## Not in this build yet
 
-- Before / after compare mode
-- Export
-- Edit history timeline with undo/redo
 - Hugging Face AI assistant
 - Morphology-based local cleanup tools
 - Feature-descriptor matching or object-level recognition
+- Batch export
+- User-defined preset files
+- Qt Linguist `.ts/.qm` localization pipeline
 
 ## Requirements
 
@@ -56,7 +73,7 @@ uv run lightcraft
 ## Project structure
 
 ```text
-lightcraft_phase4/
+lightcraft/
 ├── docs/
 │   └── manual.md
 ├── pyproject.toml
@@ -67,9 +84,14 @@ lightcraft_phase4/
         ├── analysis_service.py
         ├── app_window.py
         ├── canvas_view.py
+        ├── compare_view.py
         ├── crop_rotate.py
         ├── document.py
+        ├── export_dialog.py
+        ├── export_service.py
         ├── histogram.py
+        ├── history.py
+        ├── i18n.py
         ├── image_io.py
         ├── main.py
         ├── models.py
@@ -83,13 +105,18 @@ lightcraft_phase4/
 
 ## Architecture note
 
-This phase intentionally moves scene analysis and presets out of the main window and into separate modules.
-That keeps the UI thinner and makes future work easier:
+This build keeps the app maintainable by isolating responsibilities:
 
-- user presets can extend `PresetRegistry`
-- AI ranking can replace or augment the current recommendation rule
-- histogram and descriptor analysis can be reused by an AI coach
-- future controls can be added to the render engine without changing the left workflow column
+- `RenderEngine` owns pixel processing
+- `ImageDocument` owns source buffer, preview buffer, metadata, and current edit state
+- `HistoryManager` owns committed edit-state snapshots and time travel
+- `CompareView` owns compare presentation and zoom synchronization
+- `ExportDialog` owns export UI choices
+- `ExportService` owns file encoding and disk write behavior
+- `PresetRegistry` owns preset definitions and recommendation
+- `Localizer` owns language selection and UI string lookup
+
+That separation matters because future work stays localized. A Hugging Face scene classifier can attach to the analysis/preset boundary. Batch export can extend `ExportService`. Richer localization can replace the string catalog with Qt translation files without rewriting the whole window.
 
 ## Development note
 

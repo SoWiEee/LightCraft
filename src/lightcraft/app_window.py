@@ -7,8 +7,8 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
-    QFrame,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -26,10 +26,14 @@ from PySide6.QtWidgets import (
 )
 
 from .adjustments import ADJUSTMENT_SPECS, AdjustmentPanel
-from .canvas_view import CanvasView
+from .compare_view import CompareMode, CompareView
 from .crop_rotate import TRANSFORM_SPECS, TransformPanel
 from .document import ImageDocument
+from .export_dialog import ExportDialog
+from .export_service import ExportError, ExportService
 from .histogram import HistogramWidget
+from .history import HistoryManager
+from .i18n import Localizer
 from .image_io import ImageLoadError, SUPPORTED_FILTER
 from .preset_panel import PresetPanel
 from .presets import PresetRegistry
@@ -37,7 +41,7 @@ from .settings import SettingsStore
 from .settings_dialog import SettingsDialog
 from .theme import ThemeManager
 
-WORKFLOW_STEPS = [
+WORKFLOW_STEP_KEYS = [
     "1. Load",
     "2. Analyze",
     "3. Adjust",
@@ -51,24 +55,25 @@ WORKFLOW_HINTS: dict[str, str] = {
     "2. Analyze": "Read the histogram first. Check clipping, flat contrast, color cast, and whether the subject is underexposed.",
     "3. Adjust": "Fix tone and transform before style. Exposure, contrast, shadows, crop, and rotation should come before presets.",
     "4. Style": "Pick a preset that matches the scene. If the preset hides a technical flaw, go back and correct the image first.",
-    "5. Compare": "Compare against the original and ask one question: does the edit solve the problem you identified earlier?",
-    "6. Export": "Export after the edit looks correct at fit view and at 100 percent zoom. Avoid oversharpening and aggressive denoise.",
+    "5. Compare": "Use split or toggle compare. Ask whether the edit solves the problem without introducing artifacts or fake-looking color.",
+    "6. Export": "Export only after compare. Inspect at fit view and zoomed view. JPEG is fine for sharing, PNG/TIFF make more sense for lossless output.",
 }
 
 
 class AppWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("LightCraft — Phase 4")
-        self.resize(1650, 980)
-
         self.document = ImageDocument()
-        self.canvas = CanvasView()
+        self.canvas = CompareView()
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
         self.settings_store = SettingsStore()
         self.theme_manager = ThemeManager()
         self.app_settings = self.settings_store.load()
+        self.localizer = Localizer(self.app_settings.language_code)
         self.preset_registry = PresetRegistry()
+        self.export_service = ExportService()
+        self.history = HistoryManager(limit=120)
+        self._compare_mode = CompareMode.OFF
 
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
@@ -77,6 +82,17 @@ class AppWindow(QMainWindow):
         self._status = QStatusBar()
         self.setStatusBar(self._status)
 
+        self._build_state_widgets()
+        self._build_feature_widgets()
+        self._init_actions()
+        self._init_ui()
+        self._sync_settings_to_runtime()
+        self.retranslate_ui()
+        self._update_status_bar(file_name=self.localizer.tr("No image"), dimensions="—", render_state=self.localizer.tr("Idle"))
+        self.canvas.clear_images()
+        self._refresh_history_panel()
+
+    def _build_state_widgets(self) -> None:
         self._filename_label = QLabel("—")
         self._path_label = QLabel("—")
         self._dimensions_label = QLabel("—")
@@ -86,12 +102,20 @@ class AppWindow(QMainWindow):
         self._render_state_label = QLabel("Idle")
         self._pending_status_label = QLabel("0")
         self._preset_state_label = QLabel("None")
+        self._compare_state_label = QLabel("Edited only")
 
+    def _build_feature_widgets(self) -> None:
         self._workflow_list = QListWidget()
-        self._workflow_hint_label = QLabel(WORKFLOW_HINTS[WORKFLOW_STEPS[0]])
+        self._workflow_hint_label = QLabel()
         self._workflow_hint_label.setWordWrap(True)
         self._analysis_summary_label = QLabel("Load an image to get an analysis summary.")
         self._analysis_summary_label.setWordWrap(True)
+        self._analysis_intro_label = QLabel("Use the workflow to avoid random slider-tweaking. Fix the problem you can name.")
+        self._analysis_intro_label.setWordWrap(True)
+        self._analysis_file_tab_intro = QLabel("Image file information and session controls were moved here to reduce clutter in the workflow tab.")
+        self._analysis_file_tab_intro.setWordWrap(True)
+        self._history_intro_label = QLabel("This panel stores committed edit states. Use Undo/Redo for recent changes, or jump directly to an earlier step to time-travel through the edit.")
+        self._history_intro_label.setWordWrap(True)
 
         self._histogram_widget = HistogramWidget()
         self._adjustment_panel = AdjustmentPanel()
@@ -105,74 +129,109 @@ class AppWindow(QMainWindow):
         self._preset_panel.preset_apply_requested.connect(self._apply_preset)
         self._preset_panel.preset_clear_requested.connect(self._clear_preset_tag)
 
-        self._init_actions()
-        self._init_menu_bar()
-        self._init_ui()
-        self._sync_settings_to_runtime()
-        self._update_status_bar(file_name="No image", dimensions="—", render_state="Idle")
-        self.canvas.clear_image()
+        self._compare_help_label = QLabel("Compare is off. Use Edited only while adjusting. Switch to Split or Toggle before export to verify the edit actually improved the image.")
+        self._compare_help_label.setWordWrap(True)
+
+        self._history_list = QListWidget()
+        self._history_list.itemDoubleClicked.connect(lambda _: self._jump_to_selected_history())
+        self._history_placeholder = QLabel("History will appear after the first committed edit.")
+        self._history_placeholder.setWordWrap(True)
 
     def _init_actions(self) -> None:
-        self.open_action = QAction("Open Image...", self)
+        self.open_action = QAction(self)
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self.open_image_dialog)
 
-        self.reset_action = QAction("Reset to Original", self)
+        self.export_action = QAction(self)
+        self.export_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.export_action.triggered.connect(self.export_image_dialog)
+
+        self.reset_action = QAction(self)
         self.reset_action.setShortcut(QKeySequence("Ctrl+R"))
         self.reset_action.triggered.connect(self.reset_document)
 
-        self.exit_action = QAction("Exit", self)
+        self.undo_action = QAction(self)
+        self.undo_action.setShortcut(QKeySequence.StandardKey.Undo)
+        self.undo_action.triggered.connect(self.undo_history)
+
+        self.redo_action = QAction(self)
+        self.redo_action.setShortcut(QKeySequence.StandardKey.Redo)
+        self.redo_action.triggered.connect(self.redo_history)
+
+        self.exit_action = QAction(self)
         self.exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         self.exit_action.triggered.connect(QApplication.instance().quit)
 
-        self.zoom_in_action = QAction("Zoom In", self)
+        self.zoom_in_action = QAction(self)
         self.zoom_in_action.setShortcut(QKeySequence.StandardKey.ZoomIn)
         self.zoom_in_action.triggered.connect(self.canvas.zoom_in)
 
-        self.zoom_out_action = QAction("Zoom Out", self)
+        self.zoom_out_action = QAction(self)
         self.zoom_out_action.setShortcut(QKeySequence.StandardKey.ZoomOut)
         self.zoom_out_action.triggered.connect(self.canvas.zoom_out)
 
-        self.fit_action = QAction("Fit to Window", self)
+        self.fit_action = QAction(self)
         self.fit_action.setShortcut(QKeySequence("Ctrl+0"))
         self.fit_action.triggered.connect(self.canvas.fit_to_window)
 
-        self.settings_action = QAction("Settings...", self)
+        self.compare_off_action = QAction(self)
+        self.compare_off_action.triggered.connect(lambda: self._set_compare_mode(CompareMode.OFF))
+        self.compare_split_action = QAction(self)
+        self.compare_split_action.setShortcut(QKeySequence("C"))
+        self.compare_split_action.triggered.connect(lambda: self._set_compare_mode(CompareMode.SPLIT))
+        self.compare_toggle_action = QAction(self)
+        self.compare_toggle_action.setShortcut(QKeySequence("X"))
+        self.compare_toggle_action.triggered.connect(lambda: self._set_compare_mode(CompareMode.TOGGLE))
+        self.toggle_original_action = QAction(self)
+        self.toggle_original_action.setShortcut(QKeySequence("Tab"))
+        self.toggle_original_action.triggered.connect(self._toggle_compare_single_view)
+
+        self.settings_action = QAction(self)
         self.settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
         self.settings_action.triggered.connect(self.open_settings_dialog)
 
-        self.apply_recommended_preset_action = QAction("Apply Recommended Preset", self)
+        self.apply_recommended_preset_action = QAction(self)
         self.apply_recommended_preset_action.triggered.connect(self._apply_recommended_preset)
 
-        self.about_action = QAction("About", self)
+        self.about_action = QAction(self)
         self.about_action.triggered.connect(self.show_about_dialog)
 
     def _init_menu_bar(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
+        menu_bar = self.menuBar()
+        menu_bar.clear()
+        file_menu = menu_bar.addMenu(self.localizer.tr("&File"))
         file_menu.addAction(self.open_action)
+        file_menu.addAction(self.export_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
 
-        edit_menu = self.menuBar().addMenu("&Edit")
+        edit_menu = menu_bar.addMenu(self.localizer.tr("&Edit"))
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addAction(self.redo_action)
         edit_menu.addAction(self.reset_action)
 
-        view_menu = self.menuBar().addMenu("&View")
+        view_menu = menu_bar.addMenu(self.localizer.tr("&View"))
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
         view_menu.addAction(self.fit_action)
+        compare_menu = view_menu.addMenu(self.localizer.tr("Compare"))
+        compare_menu.addAction(self.compare_off_action)
+        compare_menu.addAction(self.compare_split_action)
+        compare_menu.addAction(self.compare_toggle_action)
+        compare_menu.addAction(self.toggle_original_action)
 
-        settings_menu = self.menuBar().addMenu("&Settings")
+        settings_menu = menu_bar.addMenu(self.localizer.tr("&Settings"))
         settings_menu.addAction(self.settings_action)
 
-        presets_menu = self.menuBar().addMenu("&Presets")
+        presets_menu = menu_bar.addMenu(self.localizer.tr("&Presets"))
         presets_menu.addAction(self.apply_recommended_preset_action)
 
-        self.menuBar().addMenu("&AI")
-
-        help_menu = self.menuBar().addMenu("&Help")
+        menu_bar.addMenu(self.localizer.tr("&AI"))
+        help_menu = menu_bar.addMenu(self.localizer.tr("&Help"))
         help_menu.addAction(self.about_action)
 
     def _init_ui(self) -> None:
+        self.resize(1720, 1000)
         central = QWidget()
         root_layout = QHBoxLayout(central)
         root_layout.setContentsMargins(8, 8, 8, 8)
@@ -181,77 +240,143 @@ class AppWindow(QMainWindow):
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_center_panel())
         splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([340, 960, 420])
-        splitter.setStretchFactor(0, 0)
+        splitter.setSizes([380, 960, 430])
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
 
         root_layout.addWidget(splitter)
         self.setCentralWidget(central)
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(300)
-        panel.setMaximumWidth(420)
+        panel.setMinimumWidth(320)
+        panel.setMaximumWidth(460)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        workflow_box = QGroupBox("Workflow Progress")
-        workflow_layout = QVBoxLayout(workflow_box)
-        for text in WORKFLOW_STEPS:
-            self._workflow_list.addItem(QListWidgetItem(text))
+        self.left_tabs = QTabWidget()
+        self.left_tabs.addTab(self._build_workflow_tab(), "")
+        self.left_tabs.addTab(self._build_file_tab(), "")
+        layout.addWidget(self.left_tabs)
+        return panel
+
+    def _build_workflow_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        self.workflow_box = QGroupBox()
+        workflow_layout = QVBoxLayout(self.workflow_box)
+        self._workflow_list.clear()
+        for key in WORKFLOW_STEP_KEYS:
+            item = QListWidgetItem(self.localizer.tr(key))
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            self._workflow_list.addItem(item)
         self._workflow_list.setCurrentRow(0)
         self._workflow_list.currentItemChanged.connect(self._on_workflow_selection_changed)
         workflow_layout.addWidget(self._workflow_list)
 
-        hint_box = QGroupBox("Editing Guidance")
-        hint_layout = QVBoxLayout(hint_box)
-        hint_intro = QLabel("Use the workflow to avoid random slider-tweaking. Fix the problem you can name.")
-        hint_intro.setWordWrap(True)
-        hint_layout.addWidget(hint_intro)
+        self.hint_box = QGroupBox()
+        hint_layout = QVBoxLayout(self.hint_box)
+        hint_layout.addWidget(self._analysis_intro_label)
         hint_layout.addWidget(self._workflow_hint_label)
 
-        analysis_box = QGroupBox("Scene Analysis")
-        analysis_layout = QVBoxLayout(analysis_box)
+        self.analysis_box = QGroupBox()
+        analysis_layout = QVBoxLayout(self.analysis_box)
         analysis_layout.addWidget(self._analysis_summary_label)
-        apply_recommended = QPushButton("Apply Recommended Preset")
-        apply_recommended.clicked.connect(self._apply_recommended_preset)
-        analysis_layout.addWidget(apply_recommended)
+        self.apply_recommended_button = QPushButton()
+        self.apply_recommended_button.clicked.connect(self._apply_recommended_preset)
+        analysis_layout.addWidget(self.apply_recommended_button)
 
-        metadata_box = QGroupBox("Image Metadata")
-        metadata_layout = QFormLayout(metadata_box)
-        metadata_layout.addRow("Filename", self._filename_label)
-        metadata_layout.addRow("Path", self._path_label)
-        metadata_layout.addRow("Dimensions", self._dimensions_label)
-        metadata_layout.addRow("Channels", self._channels_label)
-        metadata_layout.addRow("File size", self._filesize_label)
-        metadata_layout.addRow("Zoom", self._zoom_label)
-        metadata_layout.addRow("Render state", self._render_state_label)
-        metadata_layout.addRow("Queued preview", self._pending_status_label)
-        metadata_layout.addRow("Preset", self._preset_state_label)
+        self.compare_box = QGroupBox()
+        compare_layout = QVBoxLayout(self.compare_box)
+        compare_layout.addWidget(self._compare_help_label)
+        compare_buttons = QHBoxLayout()
+        self.compare_edited_button = QPushButton()
+        self.compare_edited_button.clicked.connect(lambda: self._set_compare_mode(CompareMode.OFF))
+        self.compare_split_button = QPushButton()
+        self.compare_split_button.clicked.connect(lambda: self._set_compare_mode(CompareMode.SPLIT))
+        self.compare_toggle_button = QPushButton()
+        self.compare_toggle_button.clicked.connect(lambda: self._set_compare_mode(CompareMode.TOGGLE))
+        compare_buttons.addWidget(self.compare_edited_button)
+        compare_buttons.addWidget(self.compare_split_button)
+        compare_buttons.addWidget(self.compare_toggle_button)
+        compare_layout.addLayout(compare_buttons)
+        self.compare_swap_button = QPushButton()
+        self.compare_swap_button.clicked.connect(self._toggle_compare_single_view)
+        compare_layout.addWidget(self.compare_swap_button)
 
-        session_box = QGroupBox("Session")
-        session_layout = QVBoxLayout(session_box)
-        info = QLabel(
-            "Phase 4 adds a maintainable preset system and explainable scene analysis. "
-            "Workflow guidance stays on the left. Technical controls stay on the right."
-        )
-        info.setWordWrap(True)
-        reset_button = QPushButton("Reset to Original")
-        reset_button.clicked.connect(self.reset_document)
-        settings_button = QPushButton("Open Settings")
-        settings_button.clicked.connect(self.open_settings_dialog)
-        session_layout.addWidget(info)
-        session_layout.addWidget(reset_button)
-        session_layout.addWidget(settings_button)
+        self.history_box = QGroupBox()
+        history_layout = QVBoxLayout(self.history_box)
+        history_layout.addWidget(self._history_intro_label)
+        history_layout.addWidget(self._history_placeholder)
+        history_layout.addWidget(self._history_list, 1)
+        history_buttons = QHBoxLayout()
+        self.history_undo_button = QPushButton()
+        self.history_undo_button.clicked.connect(self.undo_history)
+        self.history_redo_button = QPushButton()
+        self.history_redo_button.clicked.connect(self.redo_history)
+        history_buttons.addWidget(self.history_undo_button)
+        history_buttons.addWidget(self.history_redo_button)
+        history_layout.addLayout(history_buttons)
+        self.history_jump_button = QPushButton()
+        self.history_jump_button.clicked.connect(self._jump_to_selected_history)
+        self.history_prune_button = QPushButton()
+        self.history_prune_button.clicked.connect(self._prune_future_history)
+        history_layout.addWidget(self.history_jump_button)
+        history_layout.addWidget(self.history_prune_button)
+
+        layout.addWidget(self.workflow_box)
+        layout.addWidget(self.hint_box)
+        layout.addWidget(self.analysis_box)
+        layout.addWidget(self.compare_box)
+        layout.addWidget(self.history_box, 1)
+        return page
+
+    def _build_file_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._analysis_file_tab_intro)
+
+        self.metadata_box = QGroupBox()
+        metadata_layout = QFormLayout(self.metadata_box)
+        self._metadata_rows: list[tuple[QLabel, QLabel]] = []
+        for key, value_label in [
+            ("Filename", self._filename_label),
+            ("Path", self._path_label),
+            ("Dimensions", self._dimensions_label),
+            ("Channels", self._channels_label),
+            ("File size", self._filesize_label),
+            ("Zoom", self._zoom_label),
+            ("Render state", self._render_state_label),
+            ("Queued preview", self._pending_status_label),
+            ("Preset", self._preset_state_label),
+            ("Compare", self._compare_state_label),
+        ]:
+            row_label = QLabel()
+            metadata_layout.addRow(row_label, value_label)
+            self._metadata_rows.append((row_label, QLabel(key)))
+            row_label.setProperty("source_text", key)
+        layout.addWidget(self.metadata_box)
+
+        self.session_box = QGroupBox()
+        session_layout = QVBoxLayout(self.session_box)
+        self.session_info_label = QLabel("Phase 5 adds time-travel edit history and keeps file information in a dedicated tab so the workflow column stays focused.")
+        self.session_info_label.setWordWrap(True)
+        self.file_open_button = QPushButton()
+        self.file_open_button.clicked.connect(self.open_image_dialog)
+        self.file_reset_button = QPushButton()
+        self.file_reset_button.clicked.connect(self.reset_document)
+        self.file_settings_button = QPushButton()
+        self.file_settings_button.clicked.connect(self.open_settings_dialog)
+        self.file_export_button = QPushButton()
+        self.file_export_button.clicked.connect(self.export_image_dialog)
+        session_layout.addWidget(self.session_info_label)
+        session_layout.addWidget(self.file_open_button)
+        session_layout.addWidget(self.file_reset_button)
+        session_layout.addWidget(self.file_settings_button)
+        session_layout.addWidget(self.file_export_button)
         session_layout.addStretch(1)
-
-        layout.addWidget(workflow_box)
-        layout.addWidget(hint_box)
-        layout.addWidget(analysis_box)
-        layout.addWidget(metadata_box)
-        layout.addWidget(session_box)
-        return panel
+        layout.addWidget(self.session_box)
+        return page
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
@@ -263,166 +388,245 @@ class AppWindow(QMainWindow):
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
         panel.setMinimumWidth(360)
-        panel.setMaximumWidth(480)
+        panel.setMaximumWidth(520)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_develop_tab(), "Develop")
-        tabs.addTab(self._build_transform_tab(), "Transform")
-        tabs.addTab(self._build_style_tab(), "Style")
-        layout.addWidget(tabs)
+        self.right_tabs = QTabWidget()
+        self.right_tabs.addTab(self._build_develop_tab(), "")
+        self.right_tabs.addTab(self._build_transform_tab(), "")
+        self.right_tabs.addTab(self._build_style_tab(), "")
+        layout.addWidget(self.right_tabs)
         return panel
 
     def _build_develop_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        histogram_box = QGroupBox("Histogram")
-        histogram_layout = QVBoxLayout(histogram_box)
+        self.histogram_box = QGroupBox()
+        histogram_layout = QVBoxLayout(self.histogram_box)
         histogram_layout.addWidget(self._histogram_widget)
 
-        adjustment_box = QGroupBox("Tone & Detail")
-        adjustment_layout = QVBoxLayout(adjustment_box)
-        adjustment_hint = QLabel("Global corrections first. Avoid trying to solve every problem with one slider.")
-        adjustment_hint.setWordWrap(True)
-        adjustment_layout.addWidget(adjustment_hint)
+        self.adjustment_box = QGroupBox()
+        adjustment_layout = QVBoxLayout(self.adjustment_box)
+        self.adjustment_hint = QLabel("Global corrections first. Avoid trying to solve every problem with one slider.")
+        self.adjustment_hint.setWordWrap(True)
+        adjustment_layout.addWidget(self.adjustment_hint)
         scroller = QScrollArea()
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.Shape.NoFrame)
         scroller.setWidget(self._adjustment_panel)
         adjustment_layout.addWidget(scroller, 1)
 
-        future_box = QGroupBox("Extension Slots")
-        future_layout = QVBoxLayout(future_box)
-        future_hint = QLabel(
-            "Reserved for future controls: temperature fine-tune, blur, texture, vignette, color-noise, and other detail tools. "
-            "The render pipeline is intentionally modular so these can be added without rewriting the window layout."
-        )
-        future_hint.setWordWrap(True)
-        future_layout.addWidget(future_hint)
+        self.future_box = QGroupBox()
+        future_layout = QVBoxLayout(self.future_box)
+        self.future_hint = QLabel("Reserved for future controls: temperature fine-tune, blur, texture, vignette, color-noise, and other detail tools. The render pipeline is intentionally modular so these can be added without rewriting the window layout.")
+        self.future_hint.setWordWrap(True)
+        future_layout.addWidget(self.future_hint)
 
-        layout.addWidget(histogram_box)
-        layout.addWidget(adjustment_box, 1)
-        layout.addWidget(future_box)
+        layout.addWidget(self.histogram_box)
+        layout.addWidget(self.adjustment_box, 1)
+        layout.addWidget(self.future_box)
         return page
 
     def _build_transform_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        transform_box = QGroupBox("Crop & Rotate")
-        transform_layout = QVBoxLayout(transform_box)
-        transform_hint = QLabel(
-            "Straighten first, then crop. Rotation changes the canvas bounds, so keep an eye on empty black corners."
-        )
-        transform_hint.setWordWrap(True)
-        transform_layout.addWidget(transform_hint)
+        self.transform_box = QGroupBox()
+        transform_layout = QVBoxLayout(self.transform_box)
+        self.transform_hint = QLabel("Straighten first, then crop. Rotation changes the canvas bounds, so keep an eye on empty black corners.")
+        self.transform_hint.setWordWrap(True)
+        transform_layout.addWidget(self.transform_hint)
         scroller = QScrollArea()
         scroller.setWidgetResizable(True)
         scroller.setFrameShape(QFrame.Shape.NoFrame)
         scroller.setWidget(self._transform_panel)
         transform_layout.addWidget(scroller, 1)
 
-        composition_box = QGroupBox("Composition Notes")
-        composition_layout = QVBoxLayout(composition_box)
-        composition_text = QLabel(
-            "Cropping is a decision, not a rescue tool. Remove dead space, level the horizon, and keep subject placement intentional."
-        )
-        composition_text.setWordWrap(True)
-        composition_layout.addWidget(composition_text)
+        self.composition_box = QGroupBox()
+        composition_layout = QVBoxLayout(self.composition_box)
+        self.composition_text = QLabel("Cropping is a decision, not a rescue tool. Remove dead space, level the horizon, and keep subject placement intentional.")
+        self.composition_text.setWordWrap(True)
+        composition_layout.addWidget(self.composition_text)
 
-        layout.addWidget(transform_box, 1)
-        layout.addWidget(composition_box)
+        layout.addWidget(self.transform_box, 1)
+        layout.addWidget(self.composition_box)
         return page
 
     def _build_style_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
 
-        preset_box = QGroupBox("Presets")
-        preset_layout = QVBoxLayout(preset_box)
-        preset_hint = QLabel(
-            "Presets are scene-aware starting points. They set multiple controls at once but still keep the edit fully adjustable."
-        )
-        preset_hint.setWordWrap(True)
-        preset_layout.addWidget(preset_hint)
+        self.preset_box = QGroupBox()
+        preset_layout = QVBoxLayout(self.preset_box)
+        self.preset_hint = QLabel("Presets are scene-aware starting points. They set multiple controls at once but still keep the edit fully adjustable.")
+        self.preset_hint.setWordWrap(True)
+        preset_layout.addWidget(self.preset_hint)
         preset_layout.addWidget(self._preset_panel)
 
-        maintainability_box = QGroupBox("Implementation Note")
-        maintainability_layout = QVBoxLayout(maintainability_box)
-        maintainability_text = QLabel(
-            "Presets live in a registry module instead of being hard-coded into the UI. This makes it easier to add user presets, AI ranking, and import/export later."
-        )
-        maintainability_text.setWordWrap(True)
-        maintainability_layout.addWidget(maintainability_text)
+        self.maintainability_box = QGroupBox()
+        maintainability_layout = QVBoxLayout(self.maintainability_box)
+        self.maintainability_text = QLabel("Presets live in a registry module instead of being hard-coded into the UI. Compare and export use separate components for the same maintainability reason.")
+        self.maintainability_text.setWordWrap(True)
+        maintainability_layout.addWidget(self.maintainability_text)
 
-        layout.addWidget(preset_box, 1)
-        layout.addWidget(maintainability_box)
+        layout.addWidget(self.preset_box, 1)
+        layout.addWidget(self.maintainability_box)
         return page
 
+    def retranslate_ui(self) -> None:
+        self.setWindowTitle(f"LightCraft — {self.localizer.tr('History')}")
+        self._init_menu_bar()
+        self.open_action.setText(self.localizer.tr("Open Image..."))
+        self.export_action.setText(self.localizer.tr("Export..."))
+        self.reset_action.setText(self.localizer.tr("Reset to Original"))
+        self.undo_action.setText(self.localizer.tr("Undo"))
+        self.redo_action.setText(self.localizer.tr("Redo"))
+        self.exit_action.setText(self.localizer.tr("Exit"))
+        self.zoom_in_action.setText(self.localizer.tr("Zoom In"))
+        self.zoom_out_action.setText(self.localizer.tr("Zoom Out"))
+        self.fit_action.setText(self.localizer.tr("Fit to Window"))
+        self.compare_off_action.setText(self.localizer.tr("Edited Only"))
+        self.compare_split_action.setText(self.localizer.tr("Split Compare"))
+        self.compare_toggle_action.setText(self.localizer.tr("Toggle Compare"))
+        self.toggle_original_action.setText(self.localizer.tr("Swap Original/Edited"))
+        self.settings_action.setText(self.localizer.tr("Settings"))
+        self.apply_recommended_preset_action.setText(self.localizer.tr("Apply Recommended Preset"))
+        self.about_action.setText(self.localizer.tr("About"))
+
+        self.left_tabs.setTabText(0, self.localizer.tr("Workflow"))
+        self.left_tabs.setTabText(1, self.localizer.tr("File"))
+        self.right_tabs.setTabText(0, self.localizer.tr("Develop"))
+        self.right_tabs.setTabText(1, self.localizer.tr("Transform"))
+        self.right_tabs.setTabText(2, self.localizer.tr("Style"))
+
+        self.workflow_box.setTitle(self.localizer.tr("Workflow Progress"))
+        self.hint_box.setTitle(self.localizer.tr("Editing Guidance"))
+        self.analysis_box.setTitle(self.localizer.tr("Scene Analysis"))
+        self.compare_box.setTitle(self.localizer.tr("Compare"))
+        self.history_box.setTitle(self.localizer.tr("History"))
+        self.metadata_box.setTitle(self.localizer.tr("Image Metadata"))
+        self.session_box.setTitle(self.localizer.tr("Session"))
+        self.histogram_box.setTitle(self.localizer.tr("Histogram"))
+        self.adjustment_box.setTitle(self.localizer.tr("Tone & Detail"))
+        self.future_box.setTitle(self.localizer.tr("Extension Slots"))
+        self.transform_box.setTitle(self.localizer.tr("Crop & Rotate"))
+        self.composition_box.setTitle(self.localizer.tr("Composition Notes"))
+        self.preset_box.setTitle(self.localizer.tr("Presets"))
+        self.maintainability_box.setTitle(self.localizer.tr("Implementation Note"))
+
+        for row in range(self._workflow_list.count()):
+            item = self._workflow_list.item(row)
+            source_key = item.data(Qt.ItemDataRole.UserRole)
+            item.setText(self.localizer.tr(source_key))
+
+        self._analysis_intro_label.setText(self.localizer.tr("Use the workflow to avoid random slider-tweaking. Fix the problem you can name."))
+        self._analysis_file_tab_intro.setText(self.localizer.tr("Image file information and session controls were moved here to reduce clutter in the workflow tab."))
+        self._history_intro_label.setText(self.localizer.tr("This panel stores committed edit states. Use Undo/Redo for recent changes, or jump directly to an earlier step to time-travel through the edit."))
+        self._history_placeholder.setText(self.localizer.tr("History will appear after the first committed edit."))
+        self.apply_recommended_button.setText(self.localizer.tr("Apply Recommended Preset"))
+        self.compare_edited_button.setText(self.localizer.tr("Edited"))
+        self.compare_split_button.setText(self.localizer.tr("Split"))
+        self.compare_toggle_button.setText(self.localizer.tr("Toggle"))
+        self.compare_swap_button.setText(self.localizer.tr("Swap Original/Edited"))
+        self.history_undo_button.setText(self.localizer.tr("Undo"))
+        self.history_redo_button.setText(self.localizer.tr("Redo"))
+        self.history_jump_button.setText(self.localizer.tr("Jump to Selected"))
+        self.history_prune_button.setText(self.localizer.tr("Clear Future Branch"))
+        self.file_open_button.setText(self.localizer.tr("Open Image..."))
+        self.file_reset_button.setText(self.localizer.tr("Reset to Original"))
+        self.file_settings_button.setText(self.localizer.tr("Open Settings"))
+        self.file_export_button.setText(self.localizer.tr("Export Current Edit"))
+        self.adjustment_hint.setText(self.localizer.tr("Global corrections first. Avoid trying to solve every problem with one slider."))
+        self.future_hint.setText(self.localizer.tr("Reserved for future controls: temperature fine-tune, blur, texture, vignette, color-noise, and other detail tools. The render pipeline is intentionally modular so these can be added without rewriting the window layout."))
+        self.transform_hint.setText(self.localizer.tr("Straighten first, then crop. Rotation changes the canvas bounds, so keep an eye on empty black corners."))
+        self.composition_text.setText(self.localizer.tr("Cropping is a decision, not a rescue tool. Remove dead space, level the horizon, and keep subject placement intentional."))
+        self.preset_hint.setText(self.localizer.tr("Presets are scene-aware starting points. They set multiple controls at once but still keep the edit fully adjustable."))
+        self.maintainability_text.setText(self.localizer.tr("Presets live in a registry module instead of being hard-coded into the UI. Compare and export use separate components for the same maintainability reason."))
+        self._workflow_hint_label.setText(self.localizer.tr(WORKFLOW_HINTS[self._current_workflow_key()]))
+        self._adjustment_panel.set_localizer(self.localizer)
+        self._transform_panel.set_localizer(self.localizer)
+        self._preset_panel.set_localizer(self.localizer)
+        self.canvas.set_localizer(self.localizer)
+        for row_label, source in self._metadata_rows:
+            row_label.setText(self.localizer.tr(source.text()))
+        self._set_compare_mode(self._compare_mode)
+        self._populate_metadata()
+        self._refresh_history_panel()
+
     def open_image_dialog(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(self, "Open Image", str(Path.home()), SUPPORTED_FILTER)
+        filename, _ = QFileDialog.getOpenFileName(self, self.localizer.tr("Open Image"), str(Path.home()), SUPPORTED_FILTER)
         if filename:
             self.open_image(filename)
 
     def open_image(self, path: str) -> None:
-        self._set_render_state("Loading...")
+        self._set_render_state(self.localizer.tr("Loading..."))
         try:
             self.document.open_image(path)
-            if self.document.preview_image is None or self.document.metadata is None:
+            if self.document.preview_image is None or self.document.metadata is None or self.document.source_image is None:
                 raise ImageLoadError("Loaded image but preview or metadata is missing")
-            self.canvas.set_image_array(self.document.preview_image, preserve_zoom=False)
+            self.history.initialize(self.document.edit_state, self.localizer.tr("Loaded image"))
+            self.canvas.set_images(original_image=self.document.source_image, edited_image=self.document.preview_image, preserve_zoom=False)
             self._adjustment_panel.reset_all()
             self._transform_panel.reset_all()
             self._preset_panel.set_active_preset(self.document.edit_state.applied_preset_id)
             self._populate_metadata()
             self._update_histogram()
             self._update_analysis_summary()
+            self._set_compare_mode(CompareMode.OFF)
             self._set_workflow_step("2. Analyze")
             self.canvas.fit_to_window()
-            self._set_render_state("Ready")
+            self._set_render_state(self.localizer.tr("Ready"))
+            self._refresh_history_panel()
         except ImageLoadError as exc:
-            self._set_render_state("Load failed")
-            QMessageBox.critical(self, "Failed to open image", str(exc))
+            self._set_render_state(self.localizer.tr("Load failed"))
+            QMessageBox.critical(self, self.localizer.tr("Failed to open image"), str(exc))
 
     def reset_document(self) -> None:
         if not self.document.has_image():
             return
-        self._set_render_state("Resetting...")
         self.document.reset()
-        self._adjustment_panel.reset_all()
-        self._transform_panel.reset_all()
-        self._preset_panel.set_active_preset(None)
-        if self.document.preview_image is not None:
-            self.canvas.set_image_array(self.document.preview_image, preserve_zoom=False)
-            self.canvas.fit_to_window()
-        self._update_histogram()
-        self._update_analysis_summary()
-        self._populate_metadata()
-        self._set_workflow_step("2. Analyze")
-        self._set_render_state("Ready")
+        self._sync_controls_from_state()
+        self._record_history(self.localizer.tr("Reset edit"), workflow_step="3. Adjust", preserve_zoom=False)
+
+    def export_image_dialog(self) -> None:
+        if not self.document.has_image() or self.document.preview_image is None or self.document.metadata is None:
+            return
+        export_dialog = ExportDialog(self)
+        if not export_dialog.exec():
+            return
+        options = export_dialog.selected_options()
+        suggested = self.document.metadata.path.with_name(f"{self.document.metadata.path.stem}_edited{ExportDialog.default_suffix_for(options.format_name)}")
+        target_path, _ = QFileDialog.getSaveFileName(self, self.localizer.tr("Export Image"), str(suggested), self.localizer.tr("All Files (*)"))
+        if not target_path:
+            return
+        self._set_workflow_step("6. Export")
+        self._set_render_state(self.localizer.tr("Exporting..."))
+        try:
+            saved_path = self.export_service.export_image(self.document.preview_image, target_path, options)
+            self.statusBar().showMessage(f"Exported to {saved_path}", 5000)
+            self._set_render_state(self.localizer.tr("Export complete"))
+        except ExportError as exc:
+            self._set_render_state(self.localizer.tr("Export failed"))
+            QMessageBox.critical(self, self.localizer.tr("Export failed"), str(exc))
 
     def open_settings_dialog(self) -> None:
-        dialog = SettingsDialog(self.app_settings, self)
+        dialog = SettingsDialog(self.app_settings, self.localizer, self)
         if dialog.exec():
             self.app_settings = dialog.selected_state()
             self.settings_store.save(self.app_settings)
             self._sync_settings_to_runtime()
+            self.retranslate_ui()
 
     def show_about_dialog(self) -> None:
-        QMessageBox.information(
-            self,
-            "About LightCraft",
-            "LightCraft Phase 4\n\n"
-            "A workflow-based desktop photo editor for beginner photographers.\n"
-            "This build adds a preset registry and explainable scene analysis.",
-        )
+        QMessageBox.information(self, self.localizer.tr("About"), f"{self.localizer.tr('LightCraft Phase 5')}\n\n{self.localizer.tr('A workflow-based desktop photo editor for beginner photographers.\nThis build adds compare and export while keeping the architecture modular.')}")
 
     def _sync_settings_to_runtime(self) -> None:
         app = QApplication.instance()
         if app is None:
             return
+        self.localizer.set_language(self.app_settings.language_code)
         self.theme_manager.apply(app, self.app_settings)
         self._preview_timer.setInterval(self.app_settings.preview_debounce_ms)
 
@@ -440,16 +644,12 @@ class AppWindow(QMainWindow):
         preset_id = self.document.edit_state.applied_preset_id
         preset_name = self.preset_registry.get(preset_id).name if preset_id else "None"
         self._preset_state_label.setText(preset_name)
-        self._update_status_bar(
-            file_name=metadata.filename,
-            dimensions=f"{metadata.width} × {metadata.height}",
-            render_state=self._render_state_label.text(),
-        )
+        self._update_status_bar(file_name=metadata.filename, dimensions=f"{metadata.width} × {metadata.height}", render_state=self._render_state_label.text())
 
     def _on_zoom_changed(self, scale: float) -> None:
         self._zoom_label.setText(f"{scale * 100:.0f}%")
         dimensions = self._dimensions_label.text() if self.document.metadata else "—"
-        file_name = self.document.metadata.filename if self.document.metadata else "No image"
+        file_name = self.document.metadata.filename if self.document.metadata else self.localizer.tr("No image")
         self._update_status_bar(file_name=file_name, dimensions=dimensions, render_state=self._render_state_label.text())
 
     def _on_adjustment_preview_changed(self, key: str, value: float) -> None:
@@ -471,7 +671,7 @@ class AppWindow(QMainWindow):
         self.document.edit_state.applied_preset_id = None
         self._pending_status_label.setText("1")
         self._set_workflow_step(workflow_step)
-        self._set_render_state("Preview queued")
+        self._set_render_state(self.localizer.tr("Preview queued"))
         self._preview_timer.start()
 
     def _commit_edit_change(self, key: str, value: float, *, workflow_step: str) -> None:
@@ -479,26 +679,25 @@ class AppWindow(QMainWindow):
             return
         setattr(self.document.edit_state, key, value)
         self.document.edit_state.applied_preset_id = None
-        self._set_workflow_step(workflow_step)
         self._apply_preview_render()
-        self._set_render_state(f"Committed {self._pretty_key(key)}")
+        self._record_history(self.localizer.tr("Committed {label}", label=self._pretty_key(key)), workflow_step=workflow_step, preserve_zoom=True)
 
     def _apply_preview_render(self) -> None:
         if not self.document.has_image():
             return
         try:
             self.document.rerender()
-            if self.document.preview_image is not None:
-                self.canvas.set_image_array(self.document.preview_image, preserve_zoom=True)
+            if self.document.preview_image is not None and self.document.source_image is not None:
+                self.canvas.set_images(original_image=self.document.source_image, edited_image=self.document.preview_image, preserve_zoom=True)
             self._update_histogram()
             self._update_analysis_summary()
             self._pending_status_label.setText("0")
             self._populate_metadata()
-            self._set_render_state("Ready")
+            self._set_render_state(self.localizer.tr("Ready"))
         except Exception as exc:  # noqa: BLE001
             self._pending_status_label.setText("0")
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
-            self._set_render_state("Preview failed")
+            self._set_render_state(self.localizer.tr("Preview failed"))
 
     def _apply_preset(self, preset_id: str) -> None:
         if not self.document.has_image():
@@ -508,21 +707,110 @@ class AppWindow(QMainWindow):
             return
         self.preset_registry.apply(self.document.edit_state, preset_id)
         self._sync_controls_from_state()
-        self._set_workflow_step("4. Style")
         self._apply_preview_render()
-        self._set_render_state(f"Applied preset: {preset.name}")
+        self._record_history(self.localizer.tr("Preset: {name}", name=preset.name), workflow_step="4. Style", preserve_zoom=True)
 
     def _apply_recommended_preset(self) -> None:
         if not self.document.has_image():
             return
         recommendation = self.preset_registry.recommend(self.document.analysis)
-        if recommendation is None:
-            return
-        self._apply_preset(recommendation.preset_id)
+        if recommendation is not None:
+            self._apply_preset(recommendation.preset_id)
 
     def _clear_preset_tag(self) -> None:
         self.document.edit_state.applied_preset_id = None
         self._preset_panel.set_active_preset(None)
+        self._populate_metadata()
+
+    def undo_history(self) -> None:
+        state = self.history.undo()
+        if state is None:
+            return
+        self._apply_history_state(state)
+
+    def redo_history(self) -> None:
+        state = self.history.redo()
+        if state is None:
+            return
+        self._apply_history_state(state)
+
+    def _jump_to_selected_history(self) -> None:
+        current_row = self._history_list.currentRow()
+        state = self.history.jump_to(current_row)
+        if state is None:
+            return
+        self._apply_history_state(state)
+        label = self.history.current_label() or self.localizer.tr("Original")
+        self._set_render_state(self.localizer.tr("Time-travel: {label}", label=label))
+
+    def _apply_history_state(self, state) -> None:
+        self.document.set_edit_state(state)
+        self._sync_controls_from_state()
+        if self.document.preview_image is not None and self.document.source_image is not None:
+            self.canvas.set_images(original_image=self.document.source_image, edited_image=self.document.preview_image, preserve_zoom=True)
+        self._update_histogram()
+        self._update_analysis_summary()
+        self._populate_metadata()
+        self._refresh_history_panel()
+        self._set_render_state(self.localizer.tr("Ready"))
+
+    def _prune_future_history(self) -> None:
+        self.history.prune_future()
+        self._refresh_history_panel()
+
+    def _record_history(self, label: str, *, workflow_step: str, preserve_zoom: bool) -> None:
+        self.history.capture(self.document.edit_state, label)
+        if self.document.preview_image is not None and self.document.source_image is not None:
+            self.canvas.set_images(original_image=self.document.source_image, edited_image=self.document.preview_image, preserve_zoom=preserve_zoom)
+        self._set_workflow_step(workflow_step)
+        self._refresh_history_panel()
+        self._populate_metadata()
+        self._set_render_state(label)
+
+    def _refresh_history_panel(self) -> None:
+        self._history_list.clear()
+        entries = self.history.entries
+        if not entries:
+            self._history_placeholder.show()
+        else:
+            self._history_placeholder.hide()
+        for idx, entry in enumerate(entries):
+            item = QListWidgetItem(entry.label)
+            if idx == self.history.index:
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+            self._history_list.addItem(item)
+        if 0 <= self.history.index < self._history_list.count():
+            self._history_list.setCurrentRow(self.history.index)
+        self.undo_action.setEnabled(self.history.can_undo())
+        self.redo_action.setEnabled(self.history.can_redo())
+        self.history_undo_button.setEnabled(self.history.can_undo())
+        self.history_redo_button.setEnabled(self.history.can_redo())
+        has_entries = self._history_list.count() > 0
+        self.history_jump_button.setEnabled(has_entries)
+        self.history_prune_button.setEnabled(self.history.can_redo())
+
+    def _set_compare_mode(self, mode: CompareMode) -> None:
+        self._compare_mode = mode
+        self.canvas.set_mode(mode)
+        if mode == CompareMode.SPLIT:
+            self._compare_state_label.setText(self.localizer.tr("Compare: Split"))
+            self._compare_help_label.setText(self.localizer.tr("Split compare shows original and edited side by side with synchronized zoom. Use this before export to detect overcorrection."))
+        elif mode == CompareMode.TOGGLE:
+            self._compare_state_label.setText(self.localizer.tr("Compare: Toggle"))
+            self._compare_help_label.setText(self.localizer.tr("Toggle compare shows one image at a time. Press Tab to swap between original and edited without changing zoom."))
+        else:
+            self._compare_state_label.setText(self.localizer.tr("Compare: Edited only"))
+            self._compare_help_label.setText(self.localizer.tr("Edited-only mode is fastest for active adjustment. Switch to split or toggle before export so you do not judge the image from memory."))
+        self._populate_metadata()
+
+    def _toggle_compare_single_view(self) -> None:
+        if self._compare_mode != CompareMode.TOGGLE:
+            self._set_compare_mode(CompareMode.TOGGLE)
+            self.canvas.show_edited_only()
+        self.canvas.toggle_single_view()
+        self._set_workflow_step("5. Compare")
         self._populate_metadata()
 
     def _sync_controls_from_state(self) -> None:
@@ -538,45 +826,45 @@ class AppWindow(QMainWindow):
     def _update_analysis_summary(self) -> None:
         analysis = self.document.analysis
         if analysis is None:
-            self._analysis_summary_label.setText("Load an image to get an analysis summary.")
-            self._preset_panel.set_recommendation("Recommendation will appear after image analysis.")
+            self._analysis_summary_label.setText(self.localizer.tr("Load an image to get an analysis summary."))
+            self._preset_panel.set_recommendation(self.localizer.tr("Recommendation will appear after image analysis."))
             return
         recommendation = self.preset_registry.recommend(analysis)
-        recommendation_text = "No recommendation available."
+        recommendation_text = self.localizer.tr("Recommendation will appear after image analysis.")
         recommendation_id = None
         if recommendation is not None:
-            recommendation_text = (
-                f"Recommended preset: {recommendation.name}. "
-                f"Reason: scene looks like {analysis.scene_hint.lower()} and the current descriptors match that preset better than the others."
-            )
+            recommendation_text = f"Recommended preset: {recommendation.name}. Reason: scene looks like {analysis.scene_hint.lower()} and the current descriptors match that preset better than the others."
             recommendation_id = recommendation.preset_id
         self._analysis_summary_label.setText(analysis.guidance)
         self._preset_panel.set_recommendation(recommendation_text, preset_id=recommendation_id)
 
     def _set_render_state(self, state: str) -> None:
         self._render_state_label.setText(state)
-        file_name = self.document.metadata.filename if self.document.metadata else "No image"
+        file_name = self.document.metadata.filename if self.document.metadata else self.localizer.tr("No image")
         dimensions = self._dimensions_label.text() if self.document.metadata else "—"
         self._update_status_bar(file_name=file_name, dimensions=dimensions, render_state=state)
 
-    def _set_workflow_step(self, step_text: str) -> None:
-        matching = self._workflow_list.findItems(step_text, Qt.MatchFlag.MatchExactly)
-        if not matching:
-            return
-        item = matching[0]
-        self._workflow_list.setCurrentItem(item)
-        self._workflow_hint_label.setText(WORKFLOW_HINTS.get(step_text, ""))
+    def _set_workflow_step(self, step_key: str) -> None:
+        for idx in range(self._workflow_list.count()):
+            item = self._workflow_list.item(idx)
+            if item.data(Qt.ItemDataRole.UserRole) == step_key:
+                self._workflow_list.setCurrentItem(item)
+                self._workflow_hint_label.setText(self.localizer.tr(WORKFLOW_HINTS.get(step_key, "")))
+                return
+
+    def _current_workflow_key(self) -> str:
+        item = self._workflow_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else WORKFLOW_STEP_KEYS[0]
 
     def _on_workflow_selection_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
         del previous
         if current is None:
             return
-        self._workflow_hint_label.setText(WORKFLOW_HINTS.get(current.text(), ""))
+        step_key = current.data(Qt.ItemDataRole.UserRole)
+        self._workflow_hint_label.setText(self.localizer.tr(WORKFLOW_HINTS.get(step_key, "")))
 
     def _update_status_bar(self, *, file_name: str, dimensions: str, render_state: str) -> None:
-        self._status.showMessage(
-            f"File: {file_name}   |   Resolution: {dimensions}   |   Zoom: {self.canvas.scale_factor * 100:.0f}%   |   Render: {render_state}"
-        )
+        self._status.showMessage(self.localizer.tr("File: {file_name}   |   Resolution: {dimensions}   |   Zoom: {zoom}%   |   Compare: {compare}   |   Render: {render_state}", file_name=file_name, dimensions=dimensions, zoom=f"{self.canvas.scale_factor * 100:.0f}", compare=self._compare_state_label.text(), render_state=render_state))
 
     @staticmethod
     def _format_file_size(num_bytes: int) -> str:

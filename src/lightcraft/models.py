@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -19,6 +19,9 @@ class EditState:
     crop_right_pct: float = 0.0
     crop_bottom_pct: float = 0.0
     applied_preset_id: str | None = None
+
+    def clone(self) -> "EditState":
+        return replace(self)
 
 
 @dataclass(slots=True)
