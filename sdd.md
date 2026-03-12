@@ -1,1188 +1,694 @@
-# Software Design Description (SDD) v0.2
-
-## 1. Document Control
-
-- Project Name: Workflow-based Photo Editor for Beginners
-- Working Title: LightCraft Desktop
-- Document Type: Software Design Description
-- Version: 0.2
-- Status: Draft 2
-- Date: 2026-03-12
-- Target Platform: Desktop
-- Intended Implementation Language: Python 3.11+
-- Primary UI Framework: PySide6
-- Image Processing Core: OpenCV + NumPy
-- Optional AI Integration: Hugging Face Transformers
-- Package Goal: MVP for course final project
-
-## 2. Purpose
-
-This document defines the software design for a workflow-based desktop photo editor targeted at photography beginners. The product goal is to help a novice take one photo from import to shareable output through a guided editing workflow with fast visual feedback, reversible edits, and optional AI assistance.
-
-This version is more implementation-oriented than the first draft. It adds subsystem boundaries, object responsibilities, state transitions, sequence flows, quality attributes, UI structure, acceptance criteria, and fallback behavior so the design can be used as the baseline for task decomposition, sprint planning, and implementation.
-
-## 3. Design Goals
-
-### 3.1 Product Goals
-
-1. Reduce beginner confusion by exposing a fixed workflow:
-   Import → Analyze → Correct → Style → Compare → Export
-2. Make core editing operations discoverable and reversible.
-3. Keep latency low enough for interactive preview on common laptop hardware.
-4. Provide explainable AI assistance rather than opaque auto-editing.
-5. Preserve the original image through non-destructive editing.
-
-### 3.2 Engineering Goals
-
-1. Keep the MVP feasible within a student course project.
-2. Separate UI, image-processing, persistence, and AI layers.
-3. Represent edits as parameterized operations so history, undo/redo, and export remain consistent.
-4. Keep AI optional and failure-tolerant.
-5. Make the architecture extensible for future RAW support, local masking, and batch export.
-
-## 4. Scope
-
-### 4.1 In Scope
-
-1. Load image from local filesystem
-2. Show histogram
-3. Global adjustments:
-   - Exposure
-   - Contrast
-   - White balance
-   - Saturation
-   - Sharpening
-   - Denoising
-   - Shadow recovery
-4. Crop
-5. Rotate
-6. Six curated presets
-7. Before/after comparison
-8. Export edited image
-9. AI preset recommendation
-10. AI editing chat coach
-11. Edit history
-12. Undo/redo
-13. Jump from history step to associated control area
-
-### 4.2 Out of Scope for MVP
-
-1. Full catalog management
-2. Cloud synchronization
-3. Multi-image batch pipeline
-4. Professional-grade masking and healing
-5. Full RAW parity with commercial editors
-6. Plugin marketplace
-7. Collaboration features
-8. Mobile version
-
-## 5. External Technical Basis
-
-Qt for Python documents the Qt Widgets stack for desktop applications, plus the signal-slot pattern and model/view architecture for synchronized UI state. These are directly relevant to this project’s desktop interaction model and history panel design. citeturn664195search0turn664195search8turn664195search12turn664195search15
-
-OpenCV documents histogram calculation and histogram analysis primitives, which support the histogram panel and basic image-analysis layer used for recommendations and feedback. citeturn664195search1turn664195search19turn664195search16
-
-Hugging Face Transformers documents pipelines for image classification and zero-shot image classification. These are suitable for scene-type inference and preset recommendation. The general pipeline API also supports text generation style tasks for the chat coach integration. citeturn664195search2turn664195search6turn664195search10turn664195search14
-
-RawTherapee documents non-destructive editing, sidecar-based persistence, and a history stack that lets users navigate previous edits. That design informs the history and undo/redo behavior in this project. citeturn664195search3turn664195search7
-
-## 6. Assumptions and Constraints
-
-### 6.1 Assumptions
-
-1. The first release targets JPEG and PNG. RAW is deferred.
-2. The project will run on one user machine at a time.
-3. AI functionality can be disabled without breaking the editing workflow.
-4. Export is single-image only in MVP.
-5. The user works on a single active image per session.
-
-### 6.2 Constraints
-
-1. Implementation language must remain Python.
-2. The interface should remain simple enough for novice users.
-3. The project schedule favors correctness and completeness of core flow over feature breadth.
-4. The application should work offline except for optional model download.
-5. Memory usage should remain reasonable on a typical student laptop.
-
-## 7. System Context
-
-The system is a local desktop application with optional access to locally cached or remotely downloaded Hugging Face models.
-
-### External Entities
-
-- End user
-- Local filesystem
-- Optional Hugging Face model hub / cache
-- Optional GPU / accelerator
-- OS image codec stack used through Python libraries
-
-### Context Interactions
-
-1. User opens an image file.
-2. Application decodes the file and initializes an edit session.
-3. User edits through sliders, crop tools, preset buttons, and history controls.
-4. Processing engine recomputes preview output and histogram.
-5. AI service may analyze the image and return preset recommendations and guidance text.
-6. User exports final output to disk.
-
-## 8. Quality Attributes
-
-### 8.1 Usability
-
-- Controls must be grouped by workflow stage.
-- Presets must have clear names and use cases.
-- AI suggestions must include a plain-language explanation.
-
-### 8.2 Performance
-
-- Preview refresh target: under 150 ms for common slider changes on 1920px-long-edge preview images.
-- Export target: under 5 seconds for a typical 12 MP JPEG on a student laptop, excluding AI.
-
-### 8.3 Reliability
-
-- The original image must never be modified.
-- Failed AI inference must not break manual editing.
-- Undo/redo must remain consistent after preset application and parameter edits.
-
-### 8.4 Maintainability
-
-- UI, domain, and infrastructure code must remain separated.
-- Editing operations must be represented as explicit data structures, not hidden widget state.
-
-### 8.5 Extensibility
-
-- New adjustments and presets should be addable without redesigning the application shell.
-- AI providers should be swappable through an adapter interface.
-
-## 9. High-Level Architecture
-
-The application uses a layered modular architecture with event-driven UI and explicit state models.
-
-### 9.1 Layer Overview
-
-1. Presentation Layer
-   - Main window
-   - Image canvas
-   - Workflow navigator
-   - Control sidebar
-   - Histogram panel
-   - Preset panel
-   - History panel
-   - AI coach panel
-   - Export dialog
-
-2. Application Layer
-   - Session controller
-   - Workflow controller
-   - Command dispatcher
-   - History manager
-   - Render scheduler
-   - Export coordinator
-   - AI coordinator
-
-3. Domain Layer
-   - Edit session
-   - Image document
-   - Adjustment state
-   - Crop state
-   - Preset model
-   - History entry
-   - Recommendation result
-   - Chat message
-   - Export profile
-
-4. Infrastructure Layer
-   - Image IO adapter
-   - OpenCV processing adapter
-   - Histogram service
-   - EXIF reader
-   - Sidecar storage adapter
-   - Hugging Face adapter
-   - Threading / job execution utilities
-
-### 9.2 Architectural Style
-
-The system is MVC/MVVM-inspired, implemented with Qt signal-slot patterns. UI widgets publish intent. Controllers mutate domain state. Rendering services consume domain state and emit preview images and histogram data. The state object remains the single source of truth.
-
-## 10. Workflow Model
-
-The product centers on a fixed editing workflow for beginners.
-
-1. Import
-2. Analyze
-3. Correct
-4. Style
-5. Compare
-6. Export
-
-### 10.1 Stage Responsibilities
-
-#### Import
-- Select file
-- Decode image
-- Read metadata
-- Initialize edit session
-- Compute base preview and histogram
-
-#### Analyze
-- Compute quick descriptors:
-  - mean luminance
-  - luminance distribution
-  - basic color cast score
-  - saturation estimate
-  - edge density
-- Run optional AI recommendation
-- Present scene guess and recommended preset
-
-#### Correct
-- Adjust global correction controls
-
-#### Style
-- Apply curated presets
-- Fine-tune if desired
-
-#### Compare
-- Switch between original and edited image
-- Split-view or toggle comparison
-
-#### Export
-- Render full-resolution output
-- Write output file
-- Save optional sidecar
-
-## 11. UI Design
-
-## 11.1 Main Window Layout
-
-Suggested layout:
+# Software Design Document: `lightcraft`
+
+> Iterative SDD — Each phase builds on the previous one. Implement in order.
+
+---
+
+## Table of Contents
+
+1. [Project Overview](#1-project-overview)
+   - [1.1 Goal](#11-goal)
+   - [1.2 Overall Execution Flow](#12-overall-execution-flow)
+   - [1.3 Target Users](#13-target-users)
+   - [1.4 Constraints](#14-constraints)
+2. [Phase 1: Basic Image Viewer and Non-Destructive Edit Pipeline](#2-phase-1-basic-image-viewer-and-non-destructive-edit-pipeline)
+3. [Phase 2: Core Adjustment Tools and Histogram](#3-phase-2-core-adjustment-tools-and-histogram)
+   - [3.7 Sequence Diagram](#37-sequence-diagram)
+4. [Phase 3: Crop, Rotate, Compare, and Export](#4-phase-3-crop-rotate-compare-and-export)
+5. [Phase 4: Preset System](#5-phase-4-preset-system)
+6. [Phase 5: Edit History and Time Travel](#6-phase-5-edit-history-and-time-travel)
+7. [Phase 6: Hugging Face AI Assistant](#7-phase-6-hugging-face-ai-assistant)
+8. [Risks & Notes](#8-risks--notes)
+9. [Appendix: CLI-Free Desktop Launch Flow](#9-appendix-cli-free-desktop-launch-flow)
+
+---
+
+## 1. Project Overview
+
+### 1.1 Goal
+
+Build a Python desktop application named `lightcraft` for beginner photographers. The application guides users through a fixed editing workflow and provides non-destructive photo adjustments, preset recommendation, before/after comparison, export, and edit history.
+
+The project is **not** intended to match Lightroom feature-for-feature. The system focuses on:
+- A simple workflow for beginners
+- Fast visual feedback
+- Core global adjustments only
+- Preset-based editing
+- Explainable AI assistance instead of full autonomous retouching
+
+### 1.2 Overall Execution Flow
+
+The diagram below shows the full user path from opening an image through analysis, editing, preset application, history tracking, AI assistance, and export.
+
+```mermaid
+flowchart TD
+  A[Launch lightcraft] --> B[Load image]
+  B --> C[Decode image and build working copy]
+  C --> D[Compute metadata and histogram]
+  D --> E[Render initial preview]
+  E --> F{User action}
+  F -->|Adjust sliders| G[Update edit state]
+  F -->|Apply preset| H[Load preset parameters]
+  F -->|Crop / rotate| I[Update geometric transform state]
+  F -->|Ask AI assistant| J[Analyze image or user prompt]
+  G --> K[Rebuild preview from source + state]
+  H --> K
+  I --> K
+  J --> L{AI output type}
+  L -->|Preset recommendation| H
+  L -->|Coaching message| M[Display explanation]
+  K --> N[Commit history snapshot]
+  N --> F
+  F -->|Compare before/after| O[Toggle comparison view]
+  F -->|Export| P[Render final image]
+  P --> Q[Write file]
+```
+
+### 1.3 Target Users
+
+- Beginner photographers
+- Students learning image processing
+- Casual users who want a guided editing workflow instead of a professional tool with dozens of modules
+
+### 1.4 Constraints
+
+- Python implementation
+- Desktop-first UI
+- JPEG/PNG support required in MVP
+- RAW support is out of MVP scope
+- Non-destructive editing only
+- Local-first processing
+- AI features must fail gracefully when model loading, inference, or network access is unavailable
+
+**Recommended dependencies**:
+- `PySide6` for desktop UI
+- `opencv-python` for image processing
+- `numpy` for image buffer manipulation
+- `Pillow` for image I/O interop if needed
+- `transformers`, `torch` for Hugging Face model integration
+- `piexif` or equivalent for EXIF parsing if metadata display is desired
+
+Qt for Python provides image-view and graphics-view widget patterns suitable for desktop image editing, and Hugging Face pipelines provide a simplified inference interface for multiple task types. citeturn138945search10turn138945search2
+
+---
+
+## 2. Phase 1: Basic Image Viewer and Non-Destructive Edit Pipeline
+
+### 2.1 Requirements
+
+Implement the minimum desktop shell and image-processing backbone.
+
+Required capabilities:
+- Open one image file from disk
+- Display the image in the main canvas
+- Maintain an immutable source image buffer in memory
+- Maintain a mutable edit-state object separate from the source image
+- Re-render preview from source image + current edit state
+- Support reset-to-original
+- Show image filename, dimensions, and basic metadata panel placeholder
+
+### 2.2 Functional Scope
+
+Included in Phase 1:
+- Single-image editing session
+- Zoom-to-fit view
+- Scrollable image viewport
+- Side panel placeholder for later controls
+- Bottom status bar with render status and image dimensions
+
+Excluded from Phase 1:
+- Histogram
+- Adjustment sliders
+- Export
+- AI
+- History timeline
+
+### 2.3 UI Layout
+
+Suggested desktop layout:
 
 ```text
-+----------------------------------------------------------------------------------+
-| Menu / Toolbar                                                                   |
-+----------------------+-------------------------------------+----------------------+
-| Workflow + History   | Image Canvas / Compare View         | Controls / Presets   |
-|                      |                                     |                      |
-| - Import             |                                     | - Analyze            |
-| - Analyze            |                                     | - Adjustments        |
-| - Correct            |                                     | - Crop/Rotate        |
-| - Style              |                                     | - Presets            |
-| - Compare            |                                     | - AI Coach           |
-| - Export             |                                     |                      |
-+----------------------+-------------------------------------+----------------------+
-| Status Bar: file name, zoom, render status, AI status                             |
-+----------------------------------------------------------------------------------+
++---------------------------------------------------------------+
+| Menu Bar: File  Edit  View  Presets  AI  Help                 |
++---------------------------------------------------------------+
+| Left Workflow Panel |           Main Image Canvas             |
+| 1. Load            |                                           |
+| 2. Analyze         |                                           |
+| 3. Adjust          |                                           |
+| 4. Style           |                                           |
+| 5. Compare         |                                           |
+| 6. Export          |                                           |
++---------------------------------------------------------------+
+| Status Bar: file name | resolution | zoom | render state      |
++---------------------------------------------------------------+
 ```
 
-## 11.2 Core UI Components
+### 2.4 Core Objects
 
-### MainWindow
-Top-level frame, menu, toolbar, status bar, child panel composition.
+| Object | Responsibility |
+|---|---|
+| `AppWindow` | Top-level window and action wiring |
+| `ImageDocument` | Holds source image, working metadata, and session state |
+| `EditState` | Stores current adjustment parameters |
+| `RenderEngine` | Rebuilds preview image from source + edit state |
+| `CanvasView` | Displays image and handles zoom/pan |
 
-### WorkflowPanel
-Lists stages in order. Highlights current stage. Supports quick navigation.
+### 2.5 Data Model
 
-### CanvasView
-Displays preview image. Handles zoom, pan, crop overlay, rotation preview, before/after split.
+```python
+class EditState:
+    exposure: float = 0.0
+    contrast: float = 0.0
+    white_balance_temp: float = 0.0
+    saturation: float = 0.0
+    sharpening: float = 0.0
+    denoise: float = 0.0
+    shadows: float = 0.0
+    rotation_deg: float = 0.0
+    crop_rect: tuple[int, int, int, int] | None = None
+    applied_preset_id: str | None = None
+```
 
-### AdjustmentPanel
-Contains grouped sliders for:
-- exposure
-- contrast
-- white balance temperature
-- saturation
-- sharpening
-- denoising
-- shadows
+### 2.6 Render Strategy
 
-### HistogramPanel
-Displays RGB or luminance histogram.
+- Always preserve `source_image`
+- Build `preview_image` by applying operations in a fixed order
+- Do not stack edits directly on the previous preview buffer
+- Recompute from source on each committed state change
+- Use a lower-resolution preview for interactive edits if necessary
 
-### PresetPanel
-Shows six preset buttons with labels and descriptions.
+### 2.7 Processing Order
 
-### HistoryPanel
-Lists edit events in chronological order. Supports click-to-jump and undo/redo.
+Even in early phases, processing order must be fixed to prevent visual inconsistency.
 
-### AICoachPanel
-Shows recommendation summary, explanation, chat history, and prompt input.
+Recommended order:
+1. Exposure
+2. Contrast
+3. White balance
+4. Saturation
+5. Shadows
+6. Denoise
+7. Sharpening
+8. Rotation
+9. Crop
 
-### ExportDialog
-Lets user choose file name, path, format, quality, and size options.
+### 2.8 Acceptance Criteria
 
-## 11.3 UI Navigation Rules
+- User can open a JPEG or PNG file successfully
+- The original image is shown without corruption
+- Reset restores exact original preview
+- Internal state change triggers re-render without mutating the source image
+- App remains responsive on at least a 12 MP test image
 
-1. Import must happen before other stages become active.
-2. Compare view is read-only.
-3. Export is enabled only when a valid session exists.
-4. History click changes the active state snapshot.
-5. Crop mode is modal. Sliders are temporarily disabled while crop interaction is active.
+---
 
-## 12. Module Decomposition
+## 3. Phase 2: Core Adjustment Tools and Histogram
 
-## 12.1 Presentation Layer Modules
+### 3.1 Requirements
 
-### MainWindow
-Responsibilities:
-- Compose UI
-- Register actions and shortcuts
-- Bind widget signals to controllers
+Add the following global adjustment tools:
+- Histogram display
+- Exposure
+- Contrast
+- White balance
+- Saturation
+- Sharpening
+- Denoise
+- Shadows
 
-### ImageCanvasWidget
-Responsibilities:
-- Display preview pixmap
-- Support zoom and pan
-- Support compare mode
-- Support crop interaction overlay
+### 3.2 UI Controls
 
-### AdjustmentWidget
-Responsibilities:
-- Display sliders and numeric values
-- Emit parameter change intents
-- Reset section to defaults
+Each adjustment must include:
+- Slider
+- Numeric value label
+- Reset-to-default button
+- Tooltip / short explanation for beginners
 
-### PresetWidget
-Responsibilities:
-- Display six curated presets
-- Show preset explanations
-- Emit preset selected event
+Suggested slider semantics:
 
-### HistogramWidget
-Responsibilities:
-- Render histogram data
-- Switch histogram channels
+| Control | Range | Default | Step |
+|---|---:|---:|---:|
+| Exposure | -2.0 to +2.0 | 0.0 | 0.05 |
+| Contrast | -100 to +100 | 0 | 1 |
+| White balance | -100 to +100 | 0 | 1 |
+| Saturation | -100 to +100 | 0 | 1 |
+| Sharpening | 0 to 100 | 0 | 1 |
+| Denoise | 0 to 100 | 0 | 1 |
+| Shadows | -100 to +100 | 0 | 1 |
 
-### HistoryWidget
-Responsibilities:
-- Render history entries
-- Highlight active state
-- Emit jump-to-entry event
+### 3.3 Histogram Requirements
 
-### AICoachWidget
-Responsibilities:
-- Display recommendation
-- Handle chat text input
-- Show AI service availability
+- Show histogram after image load
+- Update histogram after each committed edit change
+- Prefer RGB histogram overlay or luminance histogram in MVP
+- The histogram panel should help users recognize clipping and poor exposure
 
-## 12.2 Application Layer Modules
+OpenCV supports histogram calculation and visualization workflows appropriate for this phase. citeturn138945search1
 
-### SessionController
-Responsibilities:
-- Start and end sessions
-- Load image into domain objects
-- Broadcast session changes
+### 3.4 Processing Logic
 
-### WorkflowController
-Responsibilities:
-- Manage current workflow stage
-- Gate UI transitions when needed
+High-level mapping from controls to operations:
 
-### AdjustmentController
-Responsibilities:
-- Handle slider and crop/rotate actions
-- Create commands
-- Submit commands to history manager
+| Control | Suggested Implementation |
+|---|---|
+| Exposure | Scale luminance or value channel |
+| Contrast | Linear contrast stretch around midpoint |
+| White balance | Channel gain adjustment or color temperature approximation |
+| Saturation | HSV/HSL saturation scaling |
+| Sharpening | Unsharp mask or kernel-based sharpening |
+| Denoise | Gaussian / bilateral / fast denoising |
+| Shadows | Tone mapping applied on dark regions |
 
-### HistoryManager
-Responsibilities:
-- Maintain command stack
-- Maintain materialized state snapshots
-- Support undo, redo, and jump
+### 3.5 Render Policy for Sliders
 
-### RenderScheduler
-Responsibilities:
-- Debounce frequent UI changes
-- Dispatch preview renders off main UI thread
-- Drop obsolete preview jobs
+To avoid UI lag and noisy history logs:
+- While dragging a slider, preview may update with debounce
+- History snapshot is committed only on slider release
+- Histogram may update on debounce or on release depending on performance
 
-### ExportCoordinator
-Responsibilities:
-- Validate export settings
-- Trigger full-resolution render
-- Save image and optional sidecar
+Recommended debounce target:
+- 50 to 120 ms for preview update
+- Commit history only after user stops dragging
 
-### AICoordinator
-Responsibilities:
-- Trigger scene analysis
-- Request preset recommendation
-- Handle chat coach requests
-- Fallback gracefully when AI unavailable
+### 3.6 Error Handling
 
-## 12.3 Domain Layer Modules
+- If an operation fails, keep last valid preview
+- Display non-blocking toast or status-bar error
+- Never destroy source image or session state
 
-### EditSession
-Fields:
-- session_id
-- source_image_path
-- source_metadata
-- original_image_ref
-- current_state
-- history
-- ai_state
-- export_profiles
+### 3.7 Sequence Diagram
 
-### AdjustmentState
-Fields:
-- exposure: float
-- contrast: float
-- white_balance_temp: float
-- saturation: float
-- sharpening: float
-- denoise: float
-- shadows: float
+The sequence diagram below shows a slider-driven adjustment cycle.
 
-### CropState
-Fields:
-- enabled: bool
-- rect_norm: [x, y, w, h]
-- rotation_deg: float
-- aspect_lock: optional string
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant UI as AdjustmentPanel
+  participant S as EditStateStore
+  participant R as RenderEngine
+  participant H as HistogramEngine
+  participant C as CanvasView
+  participant T as HistoryManager
 
-### Preset
-Fields:
-- preset_id
-- name
-- description
-- target_scenarios
-- parameter_overrides
+  U->>UI: Drag exposure slider
+  UI->>S: update_temp(exposure)
+  S->>R: request_preview_render(state)
+  R-->>C: preview_image
+  C-->>U: display updated preview
+  U->>UI: Release slider
+  UI->>S: commit(exposure)
+  S->>H: request_histogram(state)
+  H-->>UI: histogram data
+  S->>T: push history snapshot
+```
 
-### HistoryEntry
-Fields:
-- entry_id
-- timestamp
-- action_type
-- label
-- delta
-- snapshot_ref
-- target_panel
+### 3.8 Acceptance Criteria
 
-### AIState
-Fields:
-- availability
-- model_info
-- last_scene_guess
-- recommendation
-- chat_messages
-- error
+- All seven adjustment controls affect preview correctly
+- Histogram is visible and updates consistently
+- Resetting an individual control restores its default value
+- Rapid slider motion does not freeze the UI
+- Source image remains unchanged in memory
 
-### ExportProfile
-Fields:
-- format
-- quality
-- resize_mode
-- long_edge
-- output_path
+---
 
-## 12.4 Infrastructure Layer Modules
+## 4. Phase 3: Crop, Rotate, Compare, and Export
 
-### ImageIOAdapter
-- load JPEG / PNG
-- save JPEG / PNG
-- convert between OpenCV arrays and Qt image objects
+### 4.1 Requirements
 
-### OpenCVProcessingAdapter
-- apply full edit pipeline
-- calculate intermediate images
-- expose deterministic pure functions where possible
+Add geometric transforms and output functionality.
 
-### HistogramService
-- compute luminance histogram
-- compute RGB histograms
-- normalize for display
+Required capabilities:
+- Rotate image in 90-degree increments at minimum
+- Optional free-angle rotation if performance allows
+- Crop via interactive rectangle selection
+- Before/after comparison
+- Export edited image
 
-### MetadataService
-- extract EXIF when available
+### 4.2 Compare Modes
 
-### SidecarRepository
-- save and load session metadata and edit state as JSON sidecar
+At least one comparison mode is required in MVP:
+- Toggle original / edited
 
-### HuggingFaceAdapter
-- initialize pipelines
-- run scene-type classification or zero-shot classification
-- run chat-coach text generation or LLM calls
-- expose timeout and fallback behavior
+Optional comparison modes:
+- Split view slider
+- Side-by-side view
 
-## 13. Data Model
+### 4.3 Export Requirements
 
-## 13.1 Core State Snapshot
+Supported export formats in MVP:
+- JPEG
+- PNG
+
+Export configuration:
+- Output path
+- Output filename
+- JPEG quality setting
+- Optional resize before export
+
+### 4.4 Export Logic
+
+- Re-render final image from `source_image + committed state`
+- Do not export from a low-resolution preview buffer
+- Preserve orientation consistency
+- Fail safely on invalid output path or permission error
+
+### 4.5 Acceptance Criteria
+
+- User can crop and see resulting preview
+- Rotation produces visually correct output
+- Before/after comparison is immediate and clear
+- Exported file matches edited preview within expected format limits
+- Original input file is never overwritten unless explicitly allowed in a future version
+
+---
+
+## 5. Phase 4: Preset System
+
+### 5.1 Requirements
+
+Add a preset subsystem with exactly six built-in presets that cover common beginner use cases.
+
+### 5.2 Built-In Presets
+
+Recommended preset set:
+
+| Preset ID | Name | Intended Scenario |
+|---|---|---|
+| `preset_auto_clean` | Auto Clean | Generic correction for flat images |
+| `preset_portrait_soft` | Portrait Soft | Human portraits, softer tones |
+| `preset_landscape_clear` | Landscape Clear | Outdoor scenes, stronger clarity and color |
+| `preset_night_rescue` | Night Rescue | Low-light scenes with shadow lift and denoise |
+| `preset_food_warm` | Food Warm | Warmth and moderate color pop |
+| `preset_bw_contrast` | B&W Contrast | High-contrast monochrome look |
+
+### 5.3 Preset Representation
+
+Each preset must be stored as a parameter bundle rather than a lookup image.
+
+Example JSON-like structure:
 
 ```json
 {
-  "session_id": "uuid",
-  "source_image_path": "path/to/image.jpg",
-  "adjustments": {
-    "exposure": 0.0,
-    "contrast": 0.0,
-    "white_balance_temp": 0.0,
-    "saturation": 0.0,
-    "sharpening": 0.0,
-    "denoise": 0.0,
-    "shadows": 0.0
-  },
-  "crop": {
-    "enabled": false,
-    "rect_norm": [0.0, 0.0, 1.0, 1.0],
-    "rotation_deg": 0.0,
-    "aspect_lock": null
-  },
-  "applied_preset_id": null,
-  "history_pointer": 0
-}
-```
-
-## 13.2 History Storage Strategy
-
-The system uses a hybrid strategy:
-
-1. Command log for semantic actions
-2. State snapshots for fast jump and restore
-
-Reason:
-- Pure command replay is simple but slow when history grows.
-- Pure snapshots are easy but memory-heavy.
-- Hybrid storage balances speed and simplicity.
-
-### Snapshot Policy
-
-- Create full snapshot after:
-  - image import
-  - preset apply
-  - crop commit
-  - export settings save
-  - every N slider commits, default N = 5
-- Create command entry for every committed user action
-
-## 13.3 Slider Commit Policy
-
-This is critical for usability and history cleanliness.
-
-- During drag:
-  - update preview live
-  - do not append history on every tick
-- On slider release:
-  - create one history entry
-  - merge intermediate values into final delta
-
-This avoids history spam and improves undo behavior.
-
-## 14. Preset Design
-
-## 14.1 Preset Principles
-
-1. Six presets only
-2. Each preset must correspond to a beginner-understandable scenario
-3. Presets are parameter bundles, not separate code paths
-4. Presets remain editable after application
-
-## 14.2 Proposed Presets
-
-1. Everyday Clean
-   - for casual daylight photos
-2. Portrait Soft
-   - gentler contrast and color
-3. Landscape Pop
-   - stronger contrast, color, and moderate sharpening
-4. Night Rescue
-   - shadow lift, denoise, mild contrast compensation
-5. Food Warm
-   - warmer white balance, mild saturation boost
-6. B&W Contrast
-   - monochrome conversion preset with contrast emphasis
-
-## 14.3 Preset Data Example
-
-```json
-{
-  "preset_id": "night_rescue",
-  "name": "Night Rescue",
-  "description": "Lift dark areas and reduce visible noise for low-light photos.",
-  "target_scenarios": ["night", "indoor low light", "street at night"],
-  "parameter_overrides": {
-    "exposure": 0.25,
-    "contrast": 0.05,
-    "white_balance_temp": 0.03,
-    "saturation": -0.03,
-    "sharpening": 0.08,
-    "denoise": 0.30,
-    "shadows": 0.35
+  "id": "preset_landscape_clear",
+  "display_name": "Landscape Clear",
+  "parameters": {
+    "exposure": 0.20,
+    "contrast": 18,
+    "white_balance_temp": 5,
+    "saturation": 12,
+    "sharpening": 25,
+    "denoise": 5,
+    "shadows": 10
   }
 }
 ```
 
-## 15. Image Processing Pipeline
+### 5.4 Preset Behavior
 
-## 15.1 Processing Order
+- Applying a preset overwrites the relevant adjustment parameters
+- A preset application creates a history entry
+- User may further fine-tune sliders after preset application
+- UI must show the active preset name if one is applied
 
-The preview and export pipeline should remain deterministic.
+### 5.5 Acceptance Criteria
 
-Recommended order:
+- All six presets are selectable and render different visual outcomes
+- Applying a preset updates preview and history
+- User can apply a preset and then continue manual editing
+- Reset returns to no-preset default state
 
-1. Decode source image
-2. Crop and rotate geometry transform
-3. White balance
-4. Exposure
-5. Contrast
-6. Shadow recovery
-7. Saturation
-8. Denoise
-9. Sharpen
-10. Histogram computation for rendered preview
+---
 
-Reasoning:
-- Geometry first simplifies downstream processing.
-- Denoise before sharpen prevents sharpening noise.
-- Histogram should reflect current preview state.
+## 6. Phase 5: Edit History and Time Travel
 
-## 15.2 Parameter Definitions
+### 6.1 Requirements
 
-Initial proposed normalized ranges:
+Add a history system for:
+- Undo
+- Redo
+- Jump to any previous committed state
+- Inspect named edit steps
+- Continue editing from a selected past state
 
-| Parameter | Internal Range | UI Default | UI Step | Notes |
-|---|---:|---:|---:|---|
-| Exposure | -1.0 to +1.0 | 0.0 | 0.01 | mapped to brightness/exposure transform |
-| Contrast | -1.0 to +1.0 | 0.0 | 0.01 | linear or curve-based |
-| White Balance Temp | -1.0 to +1.0 | 0.0 | 0.01 | cool to warm bias |
-| Saturation | -1.0 to +1.0 | 0.0 | 0.01 | HSV / HSL based |
-| Sharpening | 0.0 to 1.0 | 0.0 | 0.01 | unsharp mask strength |
-| Denoise | 0.0 to 1.0 | 0.0 | 0.01 | bilateral / fastNlMeans style |
-| Shadows | 0.0 to 1.0 | 0.0 | 0.01 | shadow lift only |
+### 6.2 History Model
 
-These ranges are implementation defaults for MVP, not photographic absolutes. They can be remapped to more user-friendly labels later.
+The system uses committed snapshots of `EditState`.
 
-## 15.3 Preview Strategy
-
-To keep UI responsive:
-
-1. Maintain a preview-resolution working image.
-2. Render preview from scaled source.
-3. Render export from original resolution.
-4. Recompute histogram from preview render unless full-quality export histogram is explicitly needed.
-
-## 16. AI Integration Design
-
-## 16.1 AI Feature Scope
-
-### AI Preset Recommendation
-Goal:
-- Suggest one to three presets based on image content and simple descriptors.
-
-Inputs:
-- preview image
-- optional descriptors
-- candidate preset labels
-
-Outputs:
-- ranked presets
-- confidence scores
-- explanation text
-
-### AI Editing Chat Coach
-Goal:
-- answer beginner questions
-- explain what a slider does
-- explain why a preset is suggested
-- recommend next action
-
-Inputs:
-- current state summary
-- selected preset
-- image descriptors
-- user chat prompt
-
-Outputs:
-- concise coaching response
-- optional suggested UI action
-
-## 16.2 AI Architecture
-
-The AI subsystem has two layers:
-
-1. Recommendation Engine
-   - zero-shot image classification or standard image classification
-   - rule mapping from scene labels to presets
-
-2. Coach Engine
-   - local or remote language model through an adapter
-   - grounded on current edit state and preset descriptions
-
-## 16.3 Recommendation Strategy
-
-### Primary Strategy
-- Use Hugging Face image or zero-shot image classification to infer scene categories such as:
-  - portrait
-  - landscape
-  - food
-  - night
-  - indoor
-  - monochrome-friendly
-
-### Mapping Strategy
-Map inferred labels to preset candidates through a small deterministic rule table.
+Each history entry should include:
+- Step index
+- Timestamp
+- Action label
+- Serialized edit state
+- Optional thumbnail preview in later versions
 
 Example:
 
+```python
+class HistoryEntry:
+    step_id: int
+    timestamp: str
+    label: str
+    state: EditState
+```
+
+### 6.3 Commit Rules
+
+Create a history entry when:
+- Preset is applied
+- Slider drag is released
+- Crop is confirmed
+- Rotation is confirmed
+- Reset is triggered
+- AI recommendation is accepted
+
+Do not create a history entry for:
+- Hover interactions
+- Intermediate slider ticks during dragging
+- Compare toggle
+- AI chat text generation alone
+
+### 6.4 UI Requirements
+
+History panel should display a vertical list such as:
+
+```text
+[0] Original
+[1] Exposure +0.35
+[2] Landscape Clear preset
+[3] Crop 4:5 portrait
+[4] Denoise +15
+```
+
+User actions:
+- Click an entry to jump to that state
+- Undo moves one step backward
+- Redo moves one step forward
+- Editing from a past state truncates future branch in MVP
+
+### 6.5 Acceptance Criteria
+
+- Undo and redo operate on committed states only
+- Jumping to a previous step updates preview correctly
+- New edits after time-travel truncate future history in MVP
+- No history action corrupts the original source image
+
+---
+
+## 7. Phase 6: Hugging Face AI Assistant
+
+### 7.1 Requirements
+
+Add optional AI-assisted features:
+1. Preset recommendation based on the loaded image
+2. Editing chat coach that explains what the user may want to adjust next
+
+AI features are assistive only. They must not be required for core editing.
+
+### 7.2 Subsystem Scope
+
+| AI Feature | Purpose | Output |
+|---|---|---|
+| Preset recommendation | Predict a suitable starter preset | Preset ID + confidence + explanation |
+| Editing chat coach | Beginner-friendly guidance | Text response grounded in current image state |
+
+Transformers pipelines provide a unified interface for inference, including image and text tasks, which suits this modular AI layer. citeturn138945search2turn138945search14turn138945search17
+
+### 7.3 AI Integration Modes
+
+The design must support two operation modes:
+
+**Mode A: Local model available**
+- Run inference locally through `transformers` pipeline
+
+**Mode B: Model unavailable or unsupported hardware**
+- Fall back to rule-based recommendation and static coaching templates
+
+### 7.4 Preset Recommendation Logic
+
+Preferred approach for MVP:
+- Use lightweight image classification or zero-shot image classification
+- Map scene labels to presets
+
+Example mapping:
+
 | Scene Label | Recommended Preset |
 |---|---|
-| portrait | Portrait Soft |
-| landscape | Landscape Pop |
-| indoor low light | Night Rescue |
-| food | Food Warm |
-| casual daylight | Everyday Clean |
+| portrait / person | `preset_portrait_soft` |
+| landscape / nature | `preset_landscape_clear` |
+| night / city at night | `preset_night_rescue` |
+| food / meal | `preset_food_warm` |
+| monochrome style request | `preset_bw_contrast` |
+| unknown | `preset_auto_clean` |
 
-### Fallback Strategy
-If classification fails:
-1. use heuristic descriptors
-2. recommend Everyday Clean as safe default
-3. explain that recommendation confidence is low
+### 7.5 Chat Coach Behavior
 
-## 16.4 Chat Coach Guardrails
+Input sources:
+- User message
+- Current `EditState`
+- Lightweight image analysis summary
+- Optional histogram summary
 
-The chat coach must:
-- answer only about editing guidance, current image state, and available app features
-- avoid pretending to have made changes unless the user explicitly clicks a control
-- explain uncertainty
-- provide short answers suited to beginners
+Example prompts the UI may support:
+- “Why does this photo look dull?”
+- “What should I adjust first?”
+- “Why did you recommend this preset?”
+- “How do I make this portrait look softer?”
 
-## 16.5 AI Failure Handling
+### 7.6 Safety and Reliability Rules
 
-Possible failures:
-- no model downloaded
-- slow inference
-- unsupported hardware
-- pipeline exception
-- no internet during first model fetch
+- AI assistant must never claim an edit was applied unless the user confirms the action
+- Recommendation confidence should be shown if available
+- If inference fails, show fallback guidance immediately
+- Do not block the editing UI while AI inference is running
+- AI results should be cancelable or timeout-bounded
 
-Required behavior:
-- show AI unavailable state
-- keep all manual tools active
-- log error internally
-- allow retry
+### 7.7 Sequence Diagram
 
-## 17. Concurrency and Responsiveness
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant UI as AIPanel
+  participant A as AIService
+  participant M as HF Pipeline / Rule Engine
+  participant S as EditStateStore
+  participant H as HistoryManager
+  participant R as RenderEngine
 
-## 17.1 Threading Principles
-
-1. UI thread must remain reserved for widget interaction and image display updates.
-2. Preview rendering runs in worker threads.
-3. AI inference runs in separate worker threads or tasks.
-4. Only the latest render request should update the UI.
-
-Qt examples and guidance on signals/slots and threaded task patterns support this event-driven approach. citeturn664195search4turn664195search12
-
-## 17.2 Render Job Policy
-
-- debounce slider change bursts with short delay, e.g. 30 to 60 ms
-- cancel or ignore obsolete jobs
-- only commit final result with matching generation token
-
-## 18. Persistence Design
-
-## 18.1 Files
-
-1. Original image file
-2. Optional sidecar JSON file
-3. Exported output image
-
-### Sidecar Example
-
-`image.jpg.lightcraft.json`
-
-## 18.2 Sidecar Contents
-
-- image path
-- edit state
-- preset ID
-- history summary
-- export presets
-- app version
-
-This follows the non-destructive idea used by tools that store edits separately from the source image. citeturn664195search7turn664195search3
-
-## 19. Error Handling
-
-## 19.1 Import Errors
-
-- unsupported format
-- corrupted file
-- permission denied
-
-Behavior:
-- show clear error
-- keep previous session open if one exists
-
-## 19.2 Render Errors
-
-- invalid parameter state
-- OpenCV failure
-
-Behavior:
-- revert to last good preview
-- surface friendly error in status bar
-
-## 19.3 Export Errors
-
-- invalid path
-- permission denied
-- codec write failure
-
-Behavior:
-- preserve session
-- show actionable message
-
-## 19.4 AI Errors
-
-- model unavailable
-- inference timeout
-- runtime exception
-
-Behavior:
-- degrade to non-AI flow
-- preserve edit session
-
-## 20. Security and Privacy
-
-1. All editing works locally by default.
-2. AI model download may access external network only if the user enables AI and the model is not cached.
-3. No image upload is required for the base product.
-4. The app should clearly indicate if any future cloud AI mode is introduced.
-
-## 21. Sequence Flows
-
-## 21.1 Import Image
-
-```text
-User
- -> MainWindow: Open file
- -> SessionController: load_image(path)
- -> ImageIOAdapter: decode(path)
- -> MetadataService: extract(path)
- -> EditSession: initialize()
- -> HistogramService: compute(original preview)
- -> RenderScheduler: request preview
- -> MainWindow: render initial preview and histogram
+  U->>UI: Request preset recommendation
+  UI->>A: recommend(image, state)
+  A->>M: infer scene / labels
+  M-->>A: recommendation + explanation
+  A-->>UI: recommendation result
+  U->>UI: Accept preset
+  UI->>S: apply preset parameters
+  S->>R: re-render preview
+  S->>H: commit history entry
 ```
 
-## 21.2 Adjust Slider
+### 7.8 Acceptance Criteria
+
+- AI feature can be disabled without breaking the app
+- Recommendation returns a preset or fallback result
+- Chat coach returns a response within acceptable UX bounds or fails gracefully
+- Accepting an AI recommendation creates a history entry
+- AI never mutates image state without explicit user action
+
+---
+
+## 8. Risks & Notes
+
+### 8.1 Product Risks
+
+| Risk | Description |
+|---|---|
+| Scope inflation | Trying to imitate Lightroom too closely will exceed time budget |
+| UI lag | Full-resolution re-render on each slider tick may freeze the app |
+| AI dependency risk | Local models may be too large or too slow for student hardware |
+| Inconsistent preview/export | Preview pipeline and export pipeline may diverge if coded separately |
+| History bloat | Over-committing snapshots can waste memory and clutter UX |
+
+### 8.2 Technical Risks
+
+| Risk | Description |
+|---|---|
+| Color shifts | White balance and saturation implementation may produce artifacts |
+| Over-sharpening halos | Aggressive sharpening may degrade output visibly |
+| Denoise softness | Noise reduction can destroy detail |
+| Crop/rotate ordering bugs | Wrong operation order changes exported framing |
+| AI hallucination | Chat coach may give bad advice unless tightly constrained |
+
+### 8.3 Recommended Development Order
 
 ```text
-User
- -> AdjustmentWidget: drag exposure slider
- -> AdjustmentController: update transient state
- -> RenderScheduler: request preview
- -> OpenCVProcessingAdapter: render preview
- -> MainWindow: update canvas and histogram
-
-User
- -> AdjustmentWidget: release slider
- -> HistoryManager: commit command
- -> EditSession: update durable state
- -> HistoryWidget: append entry
+Phase 1 -> Verify image load, canvas, source/preview separation
+Phase 2 -> Verify global adjustment pipeline and histogram
+Phase 3 -> Verify crop/rotate/compare/export consistency
+Phase 4 -> Verify preset architecture and beginner workflows
+Phase 5 -> Verify history correctness and branch truncation
+Phase 6 -> Verify AI integration and rule-based fallback
 ```
 
-## 21.3 Apply Preset
+### 8.4 Out of Scope for MVP
 
-```text
-User
- -> PresetWidget: select preset
- -> AdjustmentController: apply preset parameters
- -> HistoryManager: commit preset command
- -> RenderScheduler: request preview
- -> MainWindow: update preview
- -> AICoachWidget: optionally explain why preset fits the image
-```
+- RAW workflow and demosaicing
+- Local masking / brush editing
+- Healing / clone stamp
+- Layer system
+- Batch editing
+- Multi-image catalog management
+- Cloud sync
 
-## 21.4 Jump to History Step
+---
 
-```text
-User
- -> HistoryWidget: select entry
- -> HistoryManager: restore snapshot
- -> SessionController: publish state changed
- -> MainWindow: update controls, preview, histogram
- -> WorkflowPanel: focus target panel
-```
+## 9. Appendix: CLI-Free Desktop Launch Flow
 
-## 21.5 Export Image
+### 9.1 Launch Behavior
 
-```text
-User
- -> ExportDialog: confirm settings
- -> ExportCoordinator: validate settings
- -> OpenCVProcessingAdapter: render full resolution
- -> ImageIOAdapter: save output
- -> SidecarRepository: save session metadata
- -> MainWindow: show export success
-```
+This is a GUI-first desktop application. No CLI usage is required for normal users.
 
-## 21.6 AI Recommendation
+Expected launch sequence:
+1. User opens desktop app
+2. Main window appears with empty-state screen
+3. User clicks “Open Image”
+4. Application loads image and enters workflow step 2 automatically
 
-```text
-SessionController
- -> AICoordinator: analyze image
- -> HuggingFaceAdapter: classify scene
- -> AICoordinator: map scene to presets
- -> MainWindow: show ranked suggestions and explanation
-```
+### 9.2 Empty-State Requirements
 
-## 22. Class Design Sketch
+When no image is loaded, display:
+- App name
+- “Open Image” primary button
+- Optional “Recent Files” placeholder for future version
+- Optional short description of the workflow
 
-```text
-MainWindow
- ├─ WorkflowPanel
- ├─ ImageCanvasWidget
- ├─ AdjustmentWidget
- ├─ HistogramWidget
- ├─ PresetWidget
- ├─ HistoryWidget
- ├─ AICoachWidget
- └─ ExportDialog
-
-SessionController
- ├─ WorkflowController
- ├─ AdjustmentController
- ├─ HistoryManager
- ├─ RenderScheduler
- ├─ ExportCoordinator
- └─ AICoordinator
-
-AICoordinator
- └─ HuggingFaceAdapter
-
-RenderScheduler
- └─ OpenCVProcessingAdapter
-
-ExportCoordinator
- ├─ OpenCVProcessingAdapter
- ├─ ImageIOAdapter
- └─ SidecarRepository
-```
-
-## 23. State Machine
-
-## 23.1 Session State
-
-```text
-NoSession
- -> Loading
- -> Ready
- -> Editing
- -> Exporting
- -> Ready
- -> Closed
-```
-
-### Rules
-- Loading failure returns to NoSession.
-- Export failure returns to Ready.
-- AI busy is a sub-state overlay, not a separate session state.
-
-## 23.2 Crop Mode State
-
-```text
-Idle
- -> CropActive
- -> CropPreview
- -> CropCommitted
- -> Idle
-```
-
-Cancel path:
-`CropActive -> Idle`
-
-## 24. Acceptance Criteria
-
-## 24.1 Functional Acceptance Criteria
-
-1. User can open a valid JPEG or PNG and see it in the canvas.
-2. Histogram updates after image load.
-3. Changing each slider updates the preview.
-4. Releasing a slider creates one history entry.
-5. Crop and rotate modify preview and export output consistently.
-6. Six presets are available and selectable.
-7. Applying a preset creates a history entry.
-8. Before/after comparison shows original and current result.
-9. Export writes a valid image file.
-10. Undo and redo work across slider edits, crop, rotate, and preset application.
-11. Clicking a history entry restores the matching state.
-12. If AI is available, the app shows preset suggestions.
-13. If AI fails, manual editing still works.
-
-## 24.2 Non-Functional Acceptance Criteria
-
-1. Preview remains interactive during slider drag on a test laptop.
-2. App does not overwrite original files.
-3. Session survives AI errors without restart.
-4. Sidecar save and load reproduces the same visible state.
-
-## 25. Testing Strategy
-
-## 25.1 Unit Tests
-
-- parameter mapping
-- preset application logic
-- history merge policy
-- sidecar serialization / deserialization
-- recommendation mapping rules
-
-## 25.2 Integration Tests
-
-- load → edit → export flow
-- history jump restoration
-- crop + rotate + export consistency
-- AI adapter fallback flow
-
-## 25.3 Manual UI Tests
-
-- slider responsiveness
-- compare toggle correctness
-- crop overlay usability
-- invalid export path behavior
-
-## 25.4 Evaluation Tests
-
-Because this is a beginner-focused editor, at least one usability evaluation should be included:
-- recruit 5 to 10 novice users
-- ask them to improve a photo with and without preset suggestions
-- measure task completion time, subjective confidence, and output satisfaction
-
-## 26. Technology Stack
-
-- Python 3.11+
-- PySide6
-- OpenCV
-- NumPy
-- Pillow if needed for image bridging
-- transformers
-- torch or other backend required by chosen model
-- pytest
-- optional pydantic / dataclasses for state schemas
-
-## 27. Project Structure Proposal
+### 9.3 Suggested File Structure
 
 ```text
 lightcraft/
-  app/
-    main.py
-    ui/
-      main_window.py
-      widgets/
-        canvas.py
-        workflow_panel.py
-        adjustments.py
-        histogram.py
-        presets.py
-        history.py
-        ai_coach.py
-        export_dialog.py
-    controllers/
-      session_controller.py
-      workflow_controller.py
-      adjustment_controller.py
-      history_manager.py
-      render_scheduler.py
-      export_coordinator.py
-      ai_coordinator.py
-    domain/
-      session.py
-      state.py
-      presets.py
-      history.py
-      export.py
-      ai_models.py
-    services/
-      image_io.py
-      processing.py
-      histogram_service.py
-      metadata_service.py
-      sidecar_repository.py
-      hf_adapter.py
-    tests/
-  docs/
-    spec.md
-    sdd.md
-  README.md
+├── app.py
+├── main_window.py
+├── models/
+│   ├── image_document.py
+│   ├── edit_state.py
+│   └── history_entry.py
+├── services/
+│   ├── render_engine.py
+│   ├── histogram_engine.py
+│   ├── export_service.py
+│   ├── preset_service.py
+│   └── ai_service.py
+├── ui/
+│   ├── canvas_view.py
+│   ├── workflow_panel.py
+│   ├── adjustment_panel.py
+│   ├── histogram_panel.py
+│   ├── history_panel.py
+│   └── ai_panel.py
+├── presets/
+│   └── builtins.json
+└── tests/
 ```
 
-## 28. Open Issues
+### 9.4 Final Note
 
-1. Final choice of AI model for local inference
-2. Exact preview cache policy
-3. Histogram display mode: RGB only or RGB + luminance
-4. Whether B&W Contrast is implemented as a preset only or as a reusable monochrome mode
-5. Whether sidecar autosave is enabled by default
-6. Whether crop aspect presets are included in MVP
-
-## 29. Risks and Mitigations
-
-| Risk | Impact | Likelihood | Mitigation |
-|---|---|---:|---|
-| AI model too slow | High | Medium | make AI optional, use fallback heuristics |
-| Preview rendering lags | High | Medium | render from preview-sized image, debounce jobs |
-| Undo/redo bugs | High | Medium | use explicit command model and snapshot checkpoints |
-| Crop UI complexity | Medium | Medium | keep crop tool simple and modal |
-| Feature creep | High | High | freeze MVP scope and postpone RAW/masking/healing |
-
-## 30. MVP Cutline
-
-### Must Have
-- load image
-- histogram
-- global adjustments
-- crop/rotate
-- six presets
-- compare mode
-- export
-- history with undo/redo
-- history jump
-- sidecar save/load
-- AI recommendation fallback path
-
-### Should Have
-- AI chat coach
-- EXIF summary
-- RGB/luminance histogram switch
-
-### Could Have
-- RAW input
-- aspect-ratio crop presets
-- export presets
-- keyboard shortcut help
-
-## 31. Implementation Plan Hooks
-
-Recommended implementation order:
-
-1. image load + canvas + histogram
-2. adjustment state + processing pipeline
-3. preview rendering loop
-4. history and undo/redo
-5. crop/rotate
-6. presets
-7. export
-8. sidecar persistence
-9. AI recommendation
-10. AI chat coach
-
-## 32. Traceability to Specification
-
-| Spec Feature | SDD Coverage |
-|---|---|
-| Load Image | Sections 10, 12, 21, 24 |
-| Histogram | Sections 11, 12, 15, 24 |
-| Global Adjustments | Sections 11, 12, 15, 24 |
-| Crop / Rotate | Sections 11, 12, 21, 24 |
-| Six Presets | Sections 14, 21, 24 |
-| Before / After | Sections 10, 11, 24 |
-| Export | Sections 18, 21, 24 |
-| AI Model Assistance | Sections 16, 19, 21, 24 |
-| Edit History | Sections 13, 21, 24 |
-
-## 33. References
-
-1. Qt for Python Widgets documentation
-2. Qt model/view documentation
-3. Qt signal-slot guidance and examples
-4. OpenCV histogram tutorials
-5. Hugging Face Transformers pipelines documentation
-6. Hugging Face zero-shot image classification guide
-7. RawTherapee RawPedia non-destructive editing and history documentation
-
+This SDD is intentionally implementation-oriented. It defines build order, state boundaries, phase-specific acceptance criteria, and interaction rules so the project can be implemented incrementally without drifting into an oversized photo editor.
