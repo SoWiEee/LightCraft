@@ -28,19 +28,38 @@ from PySide6.QtWidgets import (
 
 from .adjustments import ADJUSTMENT_SPECS, AdjustmentPanel
 from .canvas_view import CanvasView
+from .crop_rotate import TRANSFORM_SPECS, TransformPanel
 from .document import ImageDocument
 from .histogram import HistogramWidget
 from .image_io import ImageLoadError, SUPPORTED_FILTER
-from .settings import AppSettingsState, SettingsStore
+from .settings import SettingsStore
 from .settings_dialog import SettingsDialog
 from .theme import ThemeManager
+
+WORKFLOW_STEPS = [
+    "1. Load",
+    "2. Analyze",
+    "3. Adjust",
+    "4. Style",
+    "5. Compare",
+    "6. Export",
+]
+
+WORKFLOW_HINTS: dict[str, str] = {
+    "1. Load": "Start with a technically usable image. Avoid duplicates, screenshots, and extremely compressed files.",
+    "2. Analyze": "Read the histogram first. Check clipping, flat contrast, color cast, and whether the subject is underexposed.",
+    "3. Adjust": "Fix tone and transform before style. Exposure, contrast, shadows, crop, and rotation should come before presets.",
+    "4. Style": "Style should be the last 10 percent. Do not hide bad exposure behind a preset.",
+    "5. Compare": "Compare against the original and ask one question: does the edit solve the problem you identified earlier?",
+    "6. Export": "Export after the edit looks correct at fit view and at 100 percent zoom. Avoid oversharpening and aggressive denoise.",
+}
 
 
 class AppWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("LightCraft — Phase 2")
-        self.resize(1460, 920)
+        self.setWindowTitle("LightCraft — Phase 3")
+        self.resize(1600, 960)
 
         self.document = ImageDocument()
         self.canvas = CanvasView()
@@ -65,10 +84,15 @@ class AppWindow(QMainWindow):
         self._render_state_label = QLabel("Idle")
         self._pending_status_label = QLabel("0")
         self._workflow_list = QListWidget()
+        self._workflow_hint_label = QLabel(WORKFLOW_HINTS[WORKFLOW_STEPS[0]])
+        self._workflow_hint_label.setWordWrap(True)
         self._histogram_widget = HistogramWidget()
         self._adjustment_panel = AdjustmentPanel()
         self._adjustment_panel.adjustment_preview_changed.connect(self._on_adjustment_preview_changed)
         self._adjustment_panel.adjustment_committed.connect(self._on_adjustment_committed)
+        self._transform_panel = TransformPanel()
+        self._transform_panel.transform_preview_changed.connect(self._on_transform_preview_changed)
+        self._transform_panel.transform_committed.connect(self._on_transform_committed)
 
         self._init_actions()
         self._init_menu_bar()
@@ -140,35 +164,36 @@ class AppWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_center_panel())
+        splitter.addWidget(self._build_right_panel())
+        splitter.setSizes([320, 960, 380])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
 
         root_layout.addWidget(splitter)
         self.setCentralWidget(central)
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(320)
-        panel.setMaximumWidth(420)
+        panel.setMinimumWidth(280)
+        panel.setMaximumWidth(380)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        tabs = QTabWidget()
-        tabs.addTab(self._build_workflow_tab(), "Workflow")
-        tabs.addTab(self._build_adjustments_tab(), "Adjust")
-        layout.addWidget(tabs)
-        return panel
-
-    def _build_workflow_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        workflow_box = QGroupBox("Workflow")
+        workflow_box = QGroupBox("Workflow Progress")
         workflow_layout = QVBoxLayout(workflow_box)
-        for text in ["1. Load", "2. Analyze", "3. Adjust", "4. Style", "5. Compare", "6. Export"]:
+        for text in WORKFLOW_STEPS:
             self._workflow_list.addItem(QListWidgetItem(text))
-        self._workflow_list.setCurrentRow(2)
+        self._workflow_list.setCurrentRow(0)
+        self._workflow_list.currentItemChanged.connect(self._on_workflow_selection_changed)
         workflow_layout.addWidget(self._workflow_list)
+
+        hint_box = QGroupBox("Editing Guidance")
+        hint_layout = QVBoxLayout(hint_box)
+        hint_intro = QLabel("Use the workflow to avoid random slider-tweaking. Fix the problem you can name.")
+        hint_intro.setWordWrap(True)
+        hint_layout.addWidget(hint_intro)
+        hint_layout.addWidget(self._workflow_hint_label)
 
         metadata_box = QGroupBox("Image Metadata")
         metadata_layout = QFormLayout(metadata_box)
@@ -184,8 +209,8 @@ class AppWindow(QMainWindow):
         session_box = QGroupBox("Session")
         session_layout = QVBoxLayout(session_box)
         info = QLabel(
-            "Phase 2 adds global adjustment sliders and a live histogram.\n\n"
-            "Rendering stays non-destructive. Each preview rebuilds from source + EditState."
+            "Phase 3 adds transform controls and a workflow-first UI.\n\n"
+            "The left column explains what to do next. The right column holds the technical controls."
         )
         info.setWordWrap(True)
         reset_button = QPushButton("Reset to Original")
@@ -198,34 +223,11 @@ class AppWindow(QMainWindow):
         session_layout.addStretch(1)
 
         layout.addWidget(workflow_box)
+        layout.addWidget(hint_box)
         layout.addWidget(metadata_box)
         layout.addWidget(session_box)
         layout.addStretch(1)
-        return page
-
-    def _build_adjustments_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        histogram_box = QGroupBox("Histogram")
-        histogram_layout = QVBoxLayout(histogram_box)
-        histogram_layout.addWidget(self._histogram_widget)
-
-        adjustment_box = QGroupBox("Global Adjustments")
-        adjustment_layout = QVBoxLayout(adjustment_box)
-        adjustment_hint = QLabel("Hover each control for a beginner-friendly explanation.")
-        adjustment_hint.setWordWrap(True)
-        adjustment_layout.addWidget(adjustment_hint)
-
-        scroller = QScrollArea()
-        scroller.setWidgetResizable(True)
-        scroller.setFrameShape(QFrame.Shape.NoFrame)
-        scroller.setWidget(self._adjustment_panel)
-        adjustment_layout.addWidget(scroller, 1)
-
-        layout.addWidget(histogram_box)
-        layout.addWidget(adjustment_box, 1)
-        return page
+        return panel
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
@@ -235,10 +237,87 @@ class AppWindow(QMainWindow):
         header = QLabel("Main Canvas")
         header.setStyleSheet("font-size: 16px; font-weight: 600; padding: 4px 0;")
         header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        subheader = QLabel("Keep the preview large. Controls belong in the sidebars, not on top of the image.")
+        subheader.setWordWrap(True)
 
         layout.addWidget(header)
+        layout.addWidget(subheader)
         layout.addWidget(self.canvas, 1)
         return panel
+
+    def _build_right_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMinimumWidth(340)
+        panel.setMaximumWidth(460)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._build_develop_tab(), "Develop")
+        tabs.addTab(self._build_transform_tab(), "Transform")
+        layout.addWidget(tabs)
+        return panel
+
+    def _build_develop_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        histogram_box = QGroupBox("Histogram")
+        histogram_layout = QVBoxLayout(histogram_box)
+        histogram_layout.addWidget(self._histogram_widget)
+
+        adjustment_box = QGroupBox("Tone & Detail")
+        adjustment_layout = QVBoxLayout(adjustment_box)
+        adjustment_hint = QLabel("Global corrections first. Avoid trying to solve every problem with one slider.")
+        adjustment_hint.setWordWrap(True)
+        adjustment_layout.addWidget(adjustment_hint)
+        scroller = QScrollArea()
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.Shape.NoFrame)
+        scroller.setWidget(self._adjustment_panel)
+        adjustment_layout.addWidget(scroller, 1)
+
+        future_box = QGroupBox("Planned Controls")
+        future_layout = QVBoxLayout(future_box)
+        future_hint = QLabel(
+            "Reserved for later phases: temperature fine-tune, blur, texture, vignette, color noise, and other detail controls."
+        )
+        future_hint.setWordWrap(True)
+        future_layout.addWidget(future_hint)
+
+        layout.addWidget(histogram_box)
+        layout.addWidget(adjustment_box, 1)
+        layout.addWidget(future_box)
+        return page
+
+    def _build_transform_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        transform_box = QGroupBox("Crop & Rotate")
+        transform_layout = QVBoxLayout(transform_box)
+        transform_hint = QLabel(
+            "Straighten first, then crop. Rotation changes the canvas bounds, so keep an eye on empty black corners."
+        )
+        transform_hint.setWordWrap(True)
+        transform_layout.addWidget(transform_hint)
+        scroller = QScrollArea()
+        scroller.setWidgetResizable(True)
+        scroller.setFrameShape(QFrame.Shape.NoFrame)
+        scroller.setWidget(self._transform_panel)
+        transform_layout.addWidget(scroller, 1)
+
+        composition_box = QGroupBox("Composition Notes")
+        composition_layout = QVBoxLayout(composition_box)
+        composition_text = QLabel(
+            "Cropping is a decision, not a rescue tool. Remove dead space, level the horizon, and keep the subject placement intentional."
+        )
+        composition_text.setWordWrap(True)
+        composition_layout.addWidget(composition_text)
+
+        layout.addWidget(transform_box, 1)
+        layout.addWidget(composition_box)
+        return page
 
     def open_image_dialog(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(self, "Open Image", str(Path.home()), SUPPORTED_FILTER)
@@ -253,8 +332,10 @@ class AppWindow(QMainWindow):
                 raise ImageLoadError("Loaded image but preview or metadata is missing")
             self.canvas.set_image_array(self.document.preview_image, preserve_zoom=False)
             self._adjustment_panel.reset_all()
+            self._transform_panel.reset_all()
             self._populate_metadata()
             self._update_histogram()
+            self._set_workflow_step("2. Analyze")
             self.canvas.fit_to_window()
             self._set_render_state("Ready")
         except ImageLoadError as exc:
@@ -267,11 +348,13 @@ class AppWindow(QMainWindow):
         self._set_render_state("Resetting...")
         self.document.reset()
         self._adjustment_panel.reset_all()
+        self._transform_panel.reset_all()
         if self.document.preview_image is not None:
             self.canvas.set_image_array(self.document.preview_image, preserve_zoom=False)
             self.canvas.fit_to_window()
         self._update_histogram()
         self._populate_metadata()
+        self._set_workflow_step("2. Analyze")
         self._set_render_state("Ready")
 
     def open_settings_dialog(self) -> None:
@@ -285,9 +368,9 @@ class AppWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About LightCraft",
-            "LightCraft Phase 2\n\n"
+            "LightCraft Phase 3\n\n"
             "A workflow-based desktop photo editor for beginner photographers.\n"
-            "This build adds global adjustment sliders, histogram visualization, and a settings dialog with theme/font controls.",
+            "This build adds crop/rotate tools and a three-column workflow UI.",
         )
 
     def _sync_settings_to_runtime(self) -> None:
@@ -321,17 +404,31 @@ class AppWindow(QMainWindow):
         self._update_status_bar(file_name=file_name, dimensions=dimensions, render_state=self._render_state_label.text())
 
     def _on_adjustment_preview_changed(self, key: str, value: float) -> None:
+        self._queue_edit_change(key, value, workflow_step="3. Adjust")
+
+    def _on_adjustment_committed(self, key: str, value: float) -> None:
+        self._commit_edit_change(key, value, workflow_step="3. Adjust")
+
+    def _on_transform_preview_changed(self, key: str, value: float) -> None:
+        self._queue_edit_change(key, value, workflow_step="3. Adjust")
+
+    def _on_transform_committed(self, key: str, value: float) -> None:
+        self._commit_edit_change(key, value, workflow_step="3. Adjust")
+
+    def _queue_edit_change(self, key: str, value: float, *, workflow_step: str) -> None:
         if not self.document.has_image():
             return
         setattr(self.document.edit_state, key, value)
         self._pending_status_label.setText("1")
+        self._set_workflow_step(workflow_step)
         self._set_render_state("Preview queued")
         self._preview_timer.start()
 
-    def _on_adjustment_committed(self, key: str, value: float) -> None:
+    def _commit_edit_change(self, key: str, value: float, *, workflow_step: str) -> None:
         if not self.document.has_image():
             return
         setattr(self.document.edit_state, key, value)
+        self._set_workflow_step(workflow_step)
         self._apply_preview_render()
         self._set_render_state(f"Committed {self._pretty_key(key)}")
 
@@ -360,6 +457,20 @@ class AppWindow(QMainWindow):
         dimensions = self._dimensions_label.text() if self.document.metadata else "—"
         self._update_status_bar(file_name=file_name, dimensions=dimensions, render_state=state)
 
+    def _set_workflow_step(self, step_text: str) -> None:
+        matching = self._workflow_list.findItems(step_text, Qt.MatchFlag.MatchExactly)
+        if not matching:
+            return
+        item = matching[0]
+        self._workflow_list.setCurrentItem(item)
+        self._workflow_hint_label.setText(WORKFLOW_HINTS.get(step_text, ""))
+
+    def _on_workflow_selection_changed(self, current: QListWidgetItem | None, previous: QListWidgetItem | None) -> None:
+        del previous
+        if current is None:
+            return
+        self._workflow_hint_label.setText(WORKFLOW_HINTS.get(current.text(), ""))
+
     def _update_status_bar(self, *, file_name: str, dimensions: str, render_state: str) -> None:
         self._status.showMessage(
             f"File: {file_name}   |   Resolution: {dimensions}   |   Zoom: {self.canvas.scale_factor * 100:.0f}%   |   Render: {render_state}"
@@ -378,4 +489,5 @@ class AppWindow(QMainWindow):
     @staticmethod
     def _pretty_key(key: str) -> str:
         mapping = {spec.key: spec.label for spec in ADJUSTMENT_SPECS}
+        mapping.update({spec.key: spec.label for spec in TRANSFORM_SPECS})
         return mapping.get(key, key)

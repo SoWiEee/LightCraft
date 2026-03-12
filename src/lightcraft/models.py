@@ -14,7 +14,10 @@ class EditState:
     denoise: float = 0.0
     shadows: float = 0.0
     rotation_deg: float = 0.0
-    crop_rect: tuple[int, int, int, int] | None = None
+    crop_left_pct: float = 0.0
+    crop_top_pct: float = 0.0
+    crop_right_pct: float = 0.0
+    crop_bottom_pct: float = 0.0
     applied_preset_id: str | None = None
 
 

@@ -1,7 +1,7 @@
-# LightCraft Phase 2
+# LightCraft Phase 3
 
 LightCraft is a workflow-based desktop photo editor for beginner photographers.
-This Phase 2 build adds a live histogram, seven global adjustment controls, and a settings dialog with light/dark mode plus installed-font selection.
+This Phase 3 build adds a live histogram, seven global adjustment controls, and a settings dialog with light/dark mode plus installed-font selection.
 
 ## Implemented in this build
 
@@ -78,3 +78,10 @@ If your machine is missing Qt runtime dependencies, install them first and then 
 ## Development note
 
 This repository was prepared in a build environment that did not include a runnable PySide6 GUI runtime, so the code was syntax-checked and structure-checked, but the interactive window behavior still needs to be verified on your machine.
+
+
+## Phase 3 additions
+
+- Three-column UI: workflow guidance on the left, canvas in the center, technical controls on the right.
+- New Transform tab with rotate + crop controls.
+- Right sidebar reserves space for future controls such as blur, texture, vignette, and color-noise tuning.

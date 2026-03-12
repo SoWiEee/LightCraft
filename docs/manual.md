@@ -131,3 +131,23 @@ They are planned for a later phase. The current built-in preset list target is:
 
 Hugging Face recommendation and coaching are not implemented in this phase.
 They are planned for a later phase after presets and edit-history support are stable.
+
+
+## Phase 3 manual additions
+
+### UI layout
+
+- **Left sidebar**: workflow progress, editing guidance, metadata, and session actions.
+- **Center**: large preview canvas.
+- **Right sidebar**: histogram, tone/detail adjustments, and transform controls.
+
+### Crop and rotate
+
+- Use **Transform > Rotate** to straighten a tilted image.
+- Use **Crop Left/Top/Right/Bottom** to trim the frame.
+- Rotation is applied before crop.
+- Crop sliders are percentage-based to keep the Phase 3 implementation simple and non-destructive.
+
+### Planned controls
+
+The right sidebar now includes a reserved section for later controls such as temperature fine-tune, blur, texture, vignette, and color-noise reduction.
