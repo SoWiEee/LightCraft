@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -32,6 +31,8 @@ from .crop_rotate import TRANSFORM_SPECS, TransformPanel
 from .document import ImageDocument
 from .histogram import HistogramWidget
 from .image_io import ImageLoadError, SUPPORTED_FILTER
+from .preset_panel import PresetPanel
+from .presets import PresetRegistry
 from .settings import SettingsStore
 from .settings_dialog import SettingsDialog
 from .theme import ThemeManager
@@ -49,7 +50,7 @@ WORKFLOW_HINTS: dict[str, str] = {
     "1. Load": "Start with a technically usable image. Avoid duplicates, screenshots, and extremely compressed files.",
     "2. Analyze": "Read the histogram first. Check clipping, flat contrast, color cast, and whether the subject is underexposed.",
     "3. Adjust": "Fix tone and transform before style. Exposure, contrast, shadows, crop, and rotation should come before presets.",
-    "4. Style": "Style should be the last 10 percent. Do not hide bad exposure behind a preset.",
+    "4. Style": "Pick a preset that matches the scene. If the preset hides a technical flaw, go back and correct the image first.",
     "5. Compare": "Compare against the original and ask one question: does the edit solve the problem you identified earlier?",
     "6. Export": "Export after the edit looks correct at fit view and at 100 percent zoom. Avoid oversharpening and aggressive denoise.",
 }
@@ -58,16 +59,17 @@ WORKFLOW_HINTS: dict[str, str] = {
 class AppWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("LightCraft — Phase 3")
-        self.resize(1600, 960)
+        self.setWindowTitle("LightCraft — Phase 4")
+        self.resize(1650, 980)
 
         self.document = ImageDocument()
         self.canvas = CanvasView()
         self.canvas.zoom_changed.connect(self._on_zoom_changed)
-
         self.settings_store = SettingsStore()
         self.theme_manager = ThemeManager()
         self.app_settings = self.settings_store.load()
+        self.preset_registry = PresetRegistry()
+
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.timeout.connect(self._apply_preview_render)
@@ -83,9 +85,14 @@ class AppWindow(QMainWindow):
         self._zoom_label = QLabel("100%")
         self._render_state_label = QLabel("Idle")
         self._pending_status_label = QLabel("0")
+        self._preset_state_label = QLabel("None")
+
         self._workflow_list = QListWidget()
         self._workflow_hint_label = QLabel(WORKFLOW_HINTS[WORKFLOW_STEPS[0]])
         self._workflow_hint_label.setWordWrap(True)
+        self._analysis_summary_label = QLabel("Load an image to get an analysis summary.")
+        self._analysis_summary_label.setWordWrap(True)
+
         self._histogram_widget = HistogramWidget()
         self._adjustment_panel = AdjustmentPanel()
         self._adjustment_panel.adjustment_preview_changed.connect(self._on_adjustment_preview_changed)
@@ -93,6 +100,10 @@ class AppWindow(QMainWindow):
         self._transform_panel = TransformPanel()
         self._transform_panel.transform_preview_changed.connect(self._on_transform_preview_changed)
         self._transform_panel.transform_committed.connect(self._on_transform_committed)
+        self._preset_panel = PresetPanel()
+        self._preset_panel.set_presets(self.preset_registry.all())
+        self._preset_panel.preset_apply_requested.connect(self._apply_preset)
+        self._preset_panel.preset_clear_requested.connect(self._clear_preset_tag)
 
         self._init_actions()
         self._init_menu_bar()
@@ -130,6 +141,9 @@ class AppWindow(QMainWindow):
         self.settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
         self.settings_action.triggered.connect(self.open_settings_dialog)
 
+        self.apply_recommended_preset_action = QAction("Apply Recommended Preset", self)
+        self.apply_recommended_preset_action.triggered.connect(self._apply_recommended_preset)
+
         self.about_action = QAction("About", self)
         self.about_action.triggered.connect(self.show_about_dialog)
 
@@ -150,7 +164,9 @@ class AppWindow(QMainWindow):
         settings_menu = self.menuBar().addMenu("&Settings")
         settings_menu.addAction(self.settings_action)
 
-        self.menuBar().addMenu("&Presets")
+        presets_menu = self.menuBar().addMenu("&Presets")
+        presets_menu.addAction(self.apply_recommended_preset_action)
+
         self.menuBar().addMenu("&AI")
 
         help_menu = self.menuBar().addMenu("&Help")
@@ -165,7 +181,7 @@ class AppWindow(QMainWindow):
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_center_panel())
         splitter.addWidget(self._build_right_panel())
-        splitter.setSizes([320, 960, 380])
+        splitter.setSizes([340, 960, 420])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
@@ -175,8 +191,8 @@ class AppWindow(QMainWindow):
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(280)
-        panel.setMaximumWidth(380)
+        panel.setMinimumWidth(300)
+        panel.setMaximumWidth(420)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -195,6 +211,13 @@ class AppWindow(QMainWindow):
         hint_layout.addWidget(hint_intro)
         hint_layout.addWidget(self._workflow_hint_label)
 
+        analysis_box = QGroupBox("Scene Analysis")
+        analysis_layout = QVBoxLayout(analysis_box)
+        analysis_layout.addWidget(self._analysis_summary_label)
+        apply_recommended = QPushButton("Apply Recommended Preset")
+        apply_recommended.clicked.connect(self._apply_recommended_preset)
+        analysis_layout.addWidget(apply_recommended)
+
         metadata_box = QGroupBox("Image Metadata")
         metadata_layout = QFormLayout(metadata_box)
         metadata_layout.addRow("Filename", self._filename_label)
@@ -205,12 +228,13 @@ class AppWindow(QMainWindow):
         metadata_layout.addRow("Zoom", self._zoom_label)
         metadata_layout.addRow("Render state", self._render_state_label)
         metadata_layout.addRow("Queued preview", self._pending_status_label)
+        metadata_layout.addRow("Preset", self._preset_state_label)
 
         session_box = QGroupBox("Session")
         session_layout = QVBoxLayout(session_box)
         info = QLabel(
-            "Phase 3 adds transform controls and a workflow-first UI.\n\n"
-            "The left column explains what to do next. The right column holds the technical controls."
+            "Phase 4 adds a maintainable preset system and explainable scene analysis. "
+            "Workflow guidance stays on the left. Technical controls stay on the right."
         )
         info.setWordWrap(True)
         reset_button = QPushButton("Reset to Original")
@@ -224,37 +248,29 @@ class AppWindow(QMainWindow):
 
         layout.addWidget(workflow_box)
         layout.addWidget(hint_box)
+        layout.addWidget(analysis_box)
         layout.addWidget(metadata_box)
         layout.addWidget(session_box)
-        layout.addStretch(1)
         return panel
 
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-
-        header = QLabel("Main Canvas")
-        header.setStyleSheet("font-size: 16px; font-weight: 600; padding: 4px 0;")
-        header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        subheader = QLabel("Keep the preview large. Controls belong in the sidebars, not on top of the image.")
-        subheader.setWordWrap(True)
-
-        layout.addWidget(header)
-        layout.addWidget(subheader)
-        layout.addWidget(self.canvas, 1)
+        layout.addWidget(self.canvas)
         return panel
 
     def _build_right_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(340)
-        panel.setMaximumWidth(460)
+        panel.setMinimumWidth(360)
+        panel.setMaximumWidth(480)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_develop_tab(), "Develop")
         tabs.addTab(self._build_transform_tab(), "Transform")
+        tabs.addTab(self._build_style_tab(), "Style")
         layout.addWidget(tabs)
         return panel
 
@@ -277,10 +293,11 @@ class AppWindow(QMainWindow):
         scroller.setWidget(self._adjustment_panel)
         adjustment_layout.addWidget(scroller, 1)
 
-        future_box = QGroupBox("Planned Controls")
+        future_box = QGroupBox("Extension Slots")
         future_layout = QVBoxLayout(future_box)
         future_hint = QLabel(
-            "Reserved for later phases: temperature fine-tune, blur, texture, vignette, color noise, and other detail controls."
+            "Reserved for future controls: temperature fine-tune, blur, texture, vignette, color-noise, and other detail tools. "
+            "The render pipeline is intentionally modular so these can be added without rewriting the window layout."
         )
         future_hint.setWordWrap(True)
         future_layout.addWidget(future_hint)
@@ -310,13 +327,38 @@ class AppWindow(QMainWindow):
         composition_box = QGroupBox("Composition Notes")
         composition_layout = QVBoxLayout(composition_box)
         composition_text = QLabel(
-            "Cropping is a decision, not a rescue tool. Remove dead space, level the horizon, and keep the subject placement intentional."
+            "Cropping is a decision, not a rescue tool. Remove dead space, level the horizon, and keep subject placement intentional."
         )
         composition_text.setWordWrap(True)
         composition_layout.addWidget(composition_text)
 
         layout.addWidget(transform_box, 1)
         layout.addWidget(composition_box)
+        return page
+
+    def _build_style_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        preset_box = QGroupBox("Presets")
+        preset_layout = QVBoxLayout(preset_box)
+        preset_hint = QLabel(
+            "Presets are scene-aware starting points. They set multiple controls at once but still keep the edit fully adjustable."
+        )
+        preset_hint.setWordWrap(True)
+        preset_layout.addWidget(preset_hint)
+        preset_layout.addWidget(self._preset_panel)
+
+        maintainability_box = QGroupBox("Implementation Note")
+        maintainability_layout = QVBoxLayout(maintainability_box)
+        maintainability_text = QLabel(
+            "Presets live in a registry module instead of being hard-coded into the UI. This makes it easier to add user presets, AI ranking, and import/export later."
+        )
+        maintainability_text.setWordWrap(True)
+        maintainability_layout.addWidget(maintainability_text)
+
+        layout.addWidget(preset_box, 1)
+        layout.addWidget(maintainability_box)
         return page
 
     def open_image_dialog(self) -> None:
@@ -333,8 +375,10 @@ class AppWindow(QMainWindow):
             self.canvas.set_image_array(self.document.preview_image, preserve_zoom=False)
             self._adjustment_panel.reset_all()
             self._transform_panel.reset_all()
+            self._preset_panel.set_active_preset(self.document.edit_state.applied_preset_id)
             self._populate_metadata()
             self._update_histogram()
+            self._update_analysis_summary()
             self._set_workflow_step("2. Analyze")
             self.canvas.fit_to_window()
             self._set_render_state("Ready")
@@ -349,10 +393,12 @@ class AppWindow(QMainWindow):
         self.document.reset()
         self._adjustment_panel.reset_all()
         self._transform_panel.reset_all()
+        self._preset_panel.set_active_preset(None)
         if self.document.preview_image is not None:
             self.canvas.set_image_array(self.document.preview_image, preserve_zoom=False)
             self.canvas.fit_to_window()
         self._update_histogram()
+        self._update_analysis_summary()
         self._populate_metadata()
         self._set_workflow_step("2. Analyze")
         self._set_render_state("Ready")
@@ -368,9 +414,9 @@ class AppWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About LightCraft",
-            "LightCraft Phase 3\n\n"
+            "LightCraft Phase 4\n\n"
             "A workflow-based desktop photo editor for beginner photographers.\n"
-            "This build adds crop/rotate tools and a three-column workflow UI.",
+            "This build adds a preset registry and explainable scene analysis.",
         )
 
     def _sync_settings_to_runtime(self) -> None:
@@ -391,6 +437,9 @@ class AppWindow(QMainWindow):
         self._channels_label.setText(str(metadata.channels))
         self._filesize_label.setText(self._format_file_size(metadata.file_size_bytes))
         self._zoom_label.setText(f"{self.canvas.scale_factor * 100:.0f}%")
+        preset_id = self.document.edit_state.applied_preset_id
+        preset_name = self.preset_registry.get(preset_id).name if preset_id else "None"
+        self._preset_state_label.setText(preset_name)
         self._update_status_bar(
             file_name=metadata.filename,
             dimensions=f"{metadata.width} × {metadata.height}",
@@ -419,6 +468,7 @@ class AppWindow(QMainWindow):
         if not self.document.has_image():
             return
         setattr(self.document.edit_state, key, value)
+        self.document.edit_state.applied_preset_id = None
         self._pending_status_label.setText("1")
         self._set_workflow_step(workflow_step)
         self._set_render_state("Preview queued")
@@ -428,6 +478,7 @@ class AppWindow(QMainWindow):
         if not self.document.has_image():
             return
         setattr(self.document.edit_state, key, value)
+        self.document.edit_state.applied_preset_id = None
         self._set_workflow_step(workflow_step)
         self._apply_preview_render()
         self._set_render_state(f"Committed {self._pretty_key(key)}")
@@ -440,6 +491,7 @@ class AppWindow(QMainWindow):
             if self.document.preview_image is not None:
                 self.canvas.set_image_array(self.document.preview_image, preserve_zoom=True)
             self._update_histogram()
+            self._update_analysis_summary()
             self._pending_status_label.setText("0")
             self._populate_metadata()
             self._set_render_state("Ready")
@@ -448,8 +500,58 @@ class AppWindow(QMainWindow):
             self.statusBar().showMessage(f"Preview render failed: {exc}", 5000)
             self._set_render_state("Preview failed")
 
+    def _apply_preset(self, preset_id: str) -> None:
+        if not self.document.has_image():
+            return
+        preset = self.preset_registry.get(preset_id)
+        if preset is None:
+            return
+        self.preset_registry.apply(self.document.edit_state, preset_id)
+        self._sync_controls_from_state()
+        self._set_workflow_step("4. Style")
+        self._apply_preview_render()
+        self._set_render_state(f"Applied preset: {preset.name}")
+
+    def _apply_recommended_preset(self) -> None:
+        if not self.document.has_image():
+            return
+        recommendation = self.preset_registry.recommend(self.document.analysis)
+        if recommendation is None:
+            return
+        self._apply_preset(recommendation.preset_id)
+
+    def _clear_preset_tag(self) -> None:
+        self.document.edit_state.applied_preset_id = None
+        self._preset_panel.set_active_preset(None)
+        self._populate_metadata()
+
+    def _sync_controls_from_state(self) -> None:
+        for spec in ADJUSTMENT_SPECS:
+            self._adjustment_panel.set_control_value(spec.key, getattr(self.document.edit_state, spec.key), emit_signal=False)
+        for spec in TRANSFORM_SPECS:
+            self._transform_panel.set_control_value(spec.key, getattr(self.document.edit_state, spec.key), emit_signal=False)
+        self._preset_panel.set_active_preset(self.document.edit_state.applied_preset_id)
+
     def _update_histogram(self) -> None:
         self._histogram_widget.set_histogram_image(self.document.preview_image)
+
+    def _update_analysis_summary(self) -> None:
+        analysis = self.document.analysis
+        if analysis is None:
+            self._analysis_summary_label.setText("Load an image to get an analysis summary.")
+            self._preset_panel.set_recommendation("Recommendation will appear after image analysis.")
+            return
+        recommendation = self.preset_registry.recommend(analysis)
+        recommendation_text = "No recommendation available."
+        recommendation_id = None
+        if recommendation is not None:
+            recommendation_text = (
+                f"Recommended preset: {recommendation.name}. "
+                f"Reason: scene looks like {analysis.scene_hint.lower()} and the current descriptors match that preset better than the others."
+            )
+            recommendation_id = recommendation.preset_id
+        self._analysis_summary_label.setText(analysis.guidance)
+        self._preset_panel.set_recommendation(recommendation_text, preset_id=recommendation_id)
 
     def _set_render_state(self, state: str) -> None:
         self._render_state_label.setText(state)
